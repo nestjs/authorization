@@ -22,9 +22,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The oldest supported Node.js line and the current one, against the
+        # The oldest Node.js line vitest 5 runs on and the current one, against the
         # oldest supported NestJS release (12.0) and the latest 12.x.
-        node-version: [20, 24]
+        node-version: [22, 24]
         nestjs-version: ['12.0', '12']
     steps:
       - uses: actions/checkout@v7
