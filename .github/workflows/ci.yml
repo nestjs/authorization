@@ -13,6 +13,10 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - name: Build and pack @nestjs/resilience
+        run: |
+          git clone --depth 1 https://github.com/nestjs/resilience.git ../resilience
+          cd ../resilience && npm install && npm run build && npm pack
       - run: npm install
       - run: npm run build
       - run: npm run lint
@@ -32,6 +36,10 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
+      - name: Build and pack @nestjs/resilience
+        run: |
+          git clone --depth 1 https://github.com/nestjs/resilience.git ../resilience
+          cd ../resilience && npm install && npm run build && npm pack
       - name: Install dependencies
         run: npm install
       - name: Install NestJS ${{ matrix.nestjs-version }}
