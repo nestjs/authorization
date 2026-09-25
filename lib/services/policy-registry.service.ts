@@ -104,7 +104,7 @@ const GRAPHQL_FIELD_RESOLVER = 'graphql:resolve_property';
 const GRAPHQL_MODULE_OPTIONS = 'GqlModuleOptions';
 
 interface CanTarget {
-  /** `BooksController.create`. */
+  /** `ProductsController.create`. */
   where: string;
   /** The requirements that apply, each with where it was declared (class or method). */
   requirements: (CanRequirement & { declaredOn: string })[];
