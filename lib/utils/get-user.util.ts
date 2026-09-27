@@ -18,8 +18,9 @@ export const toPolicyUser = (user: unknown): unknown => (user === undefined || u
  * - `rpc`: `user` on the transport context (`ctx.switchToRpc().getContext()`),
  *   where an authentication guard or interceptor puts it. Never the message
  *   payload: whoever sends the message writes that.
- * - `graphql`: `context.req.user`, read from the resolver args positionally
- *   so this package needs no `@nestjs/graphql` dependency
+ * - `graphql`: the user authentication recorded for this operation, when it
+ *   answers (below); else `context.req.user`, read from the resolver args
+ *   positionally so this package needs no `@nestjs/graphql` dependency
  *
  * A `null` user is an answer (authentication ran, and the caller is
  * anonymous), so only `undefined` looks further.
@@ -27,11 +28,13 @@ export const toPolicyUser = (user: unknown): unknown => (user === undefined || u
  * A ws client is the connection, not the message: `client.user` holds what
  * the last authenticated message left there, so a `@Public()` message, which
  * authenticates nothing, would be checked as that user, even after the
- * session was revoked. Authentication that records each message's user
- * leaves a function on the client, `client[Symbol.for('nestjs.authentication.userOf')]`:
- * called with the execution context, it returns this message's user, `null`
- * when the message is anonymous (a `@Public()` one is), or `undefined` when
- * it has no answer. `@nestjs/authentication` does.
+ * session was revoked. Over graphql-ws, `context.req` is the socket's upgrade
+ * request, which every operation of the socket shares: the same goes for
+ * `context.req.user`. Authentication that records each call's user leaves a
+ * function on the client or the request, `[Symbol.for('nestjs.authentication.userOf')]`:
+ * called with the execution context, it returns this call's user, `null`
+ * when the call is anonymous (a `@Public()` one is), or `undefined` when it
+ * has no answer. `@nestjs/authentication` does.
  */
 export function defaultGetUser(context: ExecutionContext): unknown {
   switch (context.getType<string>()) {
@@ -39,8 +42,7 @@ export function defaultGetUser(context: ExecutionContext): unknown {
       return context.switchToHttp().getRequest()?.user;
     case 'ws': {
       const client = context.switchToWs().getClient();
-      const userOf = client?.[AUTHENTICATION_USER_OF];
-      const own = typeof userOf === 'function' ? userOf.call(client, context) : undefined;
+      const own = recordedUser(client, context);
       if (own !== undefined) {
         return own;
       }
@@ -48,10 +50,19 @@ export function defaultGetUser(context: ExecutionContext): unknown {
     }
     case 'rpc':
       return context.switchToRpc().getContext()?.user;
-    case 'graphql':
+    case 'graphql': {
       // Resolver args are (root, args, context, info).
-      return context.getArgByIndex(2)?.req?.user;
+      const req = context.getArgByIndex(2)?.req;
+      const own = recordedUser(req, context);
+      return own !== undefined ? own : req?.user;
+    }
     default:
       return undefined;
   }
+}
+
+/** What authentication answers for this call, through the function it left on `carrier`, if any. */
+function recordedUser(carrier: any, context: ExecutionContext): unknown {
+  const userOf = carrier?.[AUTHENTICATION_USER_OF];
+  return typeof userOf === 'function' ? userOf.call(carrier, context) : undefined;
 }

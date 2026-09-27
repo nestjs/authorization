@@ -334,12 +334,36 @@ describe('defaultGetUser', () => {
       expect(defaultGetUser(ctx('ws', { client: { user: 'w', [USER_OF]: { user: 'x' } } }))).toBe('w');
     });
 
-    it('is asked only on ws, where the client outlives the call', () => {
+    it('is not asked on http or rpc, whose carriers are per call', () => {
       const userOf = vi.fn(() => 'asked');
       expect(defaultGetUser(ctx('http', { request: { user: 'h', [USER_OF]: userOf } }))).toBe('h');
       expect(defaultGetUser(ctx('rpc', { rpcContext: { user: 'c', [USER_OF]: userOf } }))).toBe('c');
-      expect(defaultGetUser(ctx('graphql', { args: [{}, {}, { req: { user: 'g', [USER_OF]: userOf } }] }))).toBe('g');
       expect(userOf).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("on graphql, the operation's own user, when authentication answers for it on context.req", () => {
+    const USER_OF = Symbol.for('nestjs.authentication.userOf');
+    /** Over graphql-ws, `req` is the socket's upgrade request, which every operation of the socket shares. */
+    const operation = (req: object) => ctx('graphql', { args: [{}, {}, { req }, {}] });
+
+    it("prefers it to req.user, the socket's last user, and keeps its null (a @Public() operation)", () => {
+      const userOf = vi.fn((_context: ExecutionContext): unknown => null);
+      const req = { user: 'last', [USER_OF]: userOf };
+      const context = operation(req);
+
+      expect(defaultGetUser(context)).toBeNull();
+      expect(userOf).toHaveBeenCalledWith(context);
+      expect(userOf.mock.contexts[0]).toBe(req);
+
+      userOf.mockReturnValue('this operation');
+      expect(defaultGetUser(context)).toBe('this operation');
+    });
+
+    it('falls back to req.user when it answers undefined or is not a function', () => {
+      expect(defaultGetUser(operation({ user: 'g', [USER_OF]: () => undefined }))).toBe('g');
+      expect(defaultGetUser(operation({ user: 'g', [USER_OF]: { user: 'x' } }))).toBe('g');
+      expect(defaultGetUser(ctx('graphql', { args: [{}, {}, {}, {}] }))).toBeUndefined();
     });
   });
 });

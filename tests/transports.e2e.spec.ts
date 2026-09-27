@@ -2,7 +2,8 @@
  * Denials in every transport: `@Can()` (the guard) and `authorize()` (an
  * `AuthorizationError` leaving the handler) must reach the client in the
  * transport's own error shape, the same for both. On ws, `@Can()` checks the
- * user of each message, not the one the socket last authenticated.
+ * user of each message, not the one the socket last authenticated, and over
+ * graphql-ws the user of each operation.
  */
 import type { IncomingMessage } from 'node:http';
 import type { AddressInfo, Server as NetServer } from 'node:net';
@@ -33,6 +34,7 @@ import {
 import { WsAdapter } from '@nestjs/platform-ws';
 import { SubscribeMessage, WebSocketGateway, WsException, type OnGatewayConnection } from '@nestjs/websockets';
 import { Test } from '@nestjs/testing';
+import { createClient, type Client as GraphqlWsClient } from 'graphql-ws';
 import { lastValueFrom, throwError } from 'rxjs';
 import request from 'supertest';
 import { WebSocket } from 'ws';
@@ -359,6 +361,154 @@ describe('GraphQL (Apollo, express)', () => {
       message: 'Unauthorized',
       extensions: { code: 'UNAUTHENTICATED' },
     });
+  });
+});
+
+describe('GraphQL over graphql-ws behind per-operation authentication', () => {
+  const USER_OF = Symbol.for('nestjs.authentication.userOf');
+  type Upgrade = IncomingMessage & { user?: User | null; [USER_OF]?: (context: ExecutionContext) => unknown };
+
+  /** Sessions by id, as a session store keeps them. Signing out everywhere deletes the user's. */
+  const sessions = new Map<string, User>();
+  /** The user each operation authenticated as, keyed by its context: graphql-ws builds one per operation. */
+  const byOperation = new WeakMap<object, User | null>();
+
+  const Public = () => SetMetadata('test:public', true);
+
+  /**
+   * Stands in for `@nestjs/authentication` over graphql-ws. Every operation re-validates the
+   * session its socket's upgrade request names, records the result for itself, and mirrors it on
+   * `req.user`, the upgrade request every operation of the socket shares. A `@Public()` operation
+   * runs no check and records nothing. The request also carries the function that answers for
+   * one operation.
+   */
+  @Injectable()
+  class SessionGuard implements CanActivate {
+    constructor(private readonly reflector: Reflector) {}
+
+    async canActivate(context: ExecutionContext) {
+      const operation = context.getArgByIndex(2);
+      const req: Upgrade = operation.req;
+      req[USER_OF] = (call) => byOperation.get(call.getArgByIndex(2)) ?? null;
+      if (this.reflector.get('test:public', context.getHandler())) {
+        return true;
+      }
+
+      await sleep(context.getArgByIndex(1)?.delay ?? 0); // a slow session store
+      const session = new URL(req.url!, 'http://x').searchParams.get('session') ?? '';
+      const user = sessions.get(session) ?? null;
+      byOperation.set(operation, user);
+      req.user = user;
+      if (!user) {
+        throw new UnauthorizedException('Session expired');
+      }
+      return true;
+    }
+  }
+
+  @Resolver()
+  class PostsResolver {
+    @Query('post')
+    @Can(PostPolicy, 'create')
+    post() {
+      return true;
+    }
+
+    @Public()
+    @Query('publish')
+    @Can(PostPolicy, 'create')
+    publish() {
+      return true;
+    }
+  }
+
+  @Module({
+    imports: [
+      GraphQLModule.forRoot<ApolloDriverConfig>({
+        driver: ApolloDriver,
+        typeDefs: 'type Query { post(delay: Int): Boolean, publish: Boolean }',
+        subscriptions: { 'graphql-ws': true },
+        context: ({ req, extra }: { req?: unknown; extra?: { request: unknown } }) => ({ req: req ?? extra?.request }),
+      }),
+      AuthorizationModule.forRoot({ policies: [PostPolicy] }),
+    ],
+    providers: [{ provide: APP_GUARD, useClass: SessionGuard }, PostsResolver],
+  })
+  class GqlWsAppModule {}
+
+  let app: INestApplication;
+  let base: string;
+  const clients: GraphqlWsClient[] = [];
+  const denials: AuthorizationDeniedEvent[] = [];
+
+  /**
+   * A socket whose upgrade request names `session`. Not lazy: a lazy client closes its socket
+   * once no operation is running, and opens a new one for the next. `opened()` counts them.
+   */
+  const connect = (session: string) => {
+    let opened = 0;
+    const client = createClient({
+      url: `${base}/graphql?session=${session}`,
+      lazy: false,
+      retryAttempts: 0,
+      on: { connected: () => void opened++ },
+      webSocketImpl: WebSocket,
+    });
+    clients.push(client);
+
+    const run = async (query: string) => {
+      const results = client.iterate({ query });
+      try {
+        return (await results.next()).value;
+      } finally {
+        await results.return?.();
+      }
+    };
+    return { run, opened: () => opened };
+  };
+  const refused = (field: string, message: string) => ({
+    data: { [field]: null },
+    errors: [expect.objectContaining({ message, path: [field] })],
+  });
+
+  beforeAll(async () => {
+    app = await createApp('express', GqlWsAppModule);
+    base = `ws://127.0.0.1:${(app.getHttpServer().address() as AddressInfo).port}`;
+    app.get(AuthorizationEvents).events$.subscribe((event) => denials.push(event));
+  });
+  afterEach(async () => {
+    await Promise.all(clients.splice(0).map((client) => client.dispose()));
+    sessions.clear();
+    denials.length = 0;
+  });
+  afterAll(() => app.close());
+
+  it('evaluates a @Public() @Can() operation after a sign-out everywhere as a guest, with no protected operation in between', async () => {
+    sessions.set('stolen', users.alice);
+    const socket = connect('stolen');
+    expect(await socket.run('{ post }')).toEqual({ data: { post: true } });
+
+    sessions.delete('stolen'); // Alice signs out everywhere; the upgrade request keeps `req.user`.
+    expect(await socket.run('{ publish }')).toEqual(refused('publish', 'Unauthorized'));
+    expect(denials).toEqual([
+      expect.objectContaining({ ability: 'create', reason: 'unauthenticated', user: null, handler: 'PostsResolver.publish' }),
+    ]);
+
+    expect(await socket.run('{ post }')).toEqual(refused('post', 'Session expired'));
+    expect(socket.opened()).toBe(1); // one upgrade request for every operation
+  });
+
+  it('evaluates concurrent public and protected operations on one socket each as its own', async () => {
+    sessions.set('alice', users.alice);
+    const socket = connect('alice');
+    expect(await socket.run('{ post }')).toEqual({ data: { post: true } });
+
+    const protectedOne = socket.run('{ post(delay: 30) }'); // still checking the session...
+    const publicOne = socket.run('{ publish }'); // ...when this one is authorized
+    expect(await publicOne).toEqual(refused('publish', 'Unauthorized'));
+    expect(await protectedOne).toEqual({ data: { post: true } });
+    expect(denials).toEqual([expect.objectContaining({ user: null, handler: 'PostsResolver.publish' })]);
+    expect(socket.opened()).toBe(1);
   });
 });
 
