@@ -1,23 +1,26 @@
 /**
  * Denials in every transport: `@Can()` (the guard) and `authorize()` (an
  * `AuthorizationError` leaving the handler) must reach the client in the
- * transport's own error shape, the same for both.
+ * transport's own error shape, the same for both. On ws, `@Can()` checks the
+ * user of each message, not the one the socket last authenticated.
  */
 import type { IncomingMessage } from 'node:http';
 import type { AddressInfo, Server as NetServer } from 'node:net';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { ApolloDriver, type ApolloDriverConfig } from '@nestjs/apollo';
 import {
   Controller,
   ForbiddenException,
   Injectable,
   Module,
+  SetMetadata,
   UnauthorizedException,
   type CanActivate,
   type ExecutionContext,
   type INestApplication,
   type INestMicroservice,
 } from '@nestjs/common';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, Reflector } from '@nestjs/core';
 import { GraphQLModule, Query, ResolveField, Resolver } from '@nestjs/graphql';
 import {
   ClientProxyFactory,
@@ -28,7 +31,7 @@ import {
   type ClientProxy,
 } from '@nestjs/microservices';
 import { WsAdapter } from '@nestjs/platform-ws';
-import { SubscribeMessage, WebSocketGateway, type OnGatewayConnection } from '@nestjs/websockets';
+import { SubscribeMessage, WebSocketGateway, WsException, type OnGatewayConnection } from '@nestjs/websockets';
 import { Test } from '@nestjs/testing';
 import { lastValueFrom, throwError } from 'rxjs';
 import request from 'supertest';
@@ -37,13 +40,15 @@ import { createApp } from './support/adapters.js';
 import { AuthorizationErrorInterceptor } from '../lib/interceptors/authorization-error.interceptor.js';
 import {
   AuthorizationError,
+  AuthorizationEvents,
   AuthorizationGuard,
   AuthorizationModule,
   AuthorizationService,
   Can,
   Policy,
+  type AuthorizationDeniedEvent,
 } from '../lib/index.js';
-import { PostPolicy, users, type Post } from './fixtures.js';
+import { PostPolicy, users, type Post, type User } from './fixtures.js';
 
 const draft: Post = { id: 2, authorId: 2, title: 'Bob drafts', published: false };
 
@@ -135,6 +140,149 @@ describe('WebSocket gateway (platform-ws)', () => {
     const { data } = (await ask('eve', 'create')) as { data: Record<string, unknown> };
     const { status: _, ...body } = data;
     expect(JSON.stringify(body)).toBe(JSON.stringify(new ForbiddenException().getResponse()));
+  });
+});
+
+describe('WebSocket gateway behind per-message authentication (platform-ws)', () => {
+  const USER_OF = Symbol.for('nestjs.authentication.userOf');
+  type Client = WebSocket & {
+    session?: string;
+    user?: User | null;
+    [USER_OF]?: (context: ExecutionContext) => unknown;
+  };
+
+  /** Sessions by id, as a session store keeps them. Signing out everywhere deletes the user's. */
+  const sessions = new Map<string, User>();
+  /** The user each message authenticated as, keyed by its arguments: one array per message. */
+  const byMessage = new WeakMap<object, User | null>();
+
+  const Public = () => SetMetadata('test:public', true);
+
+  /**
+   * Stands in for `@nestjs/authentication` on ws. Every message re-validates the session the
+   * handshake named, records the result for itself, and mirrors it on the socket
+   * (`client.user`) for code that reads the socket. A `@Public()` message runs no check and
+   * records `null` for itself only, since a concurrent message shares the socket. The socket
+   * also carries the function that answers for one message.
+   */
+  @Injectable()
+  class SessionGuard implements CanActivate {
+    constructor(private readonly reflector: Reflector) {}
+
+    async canActivate(context: ExecutionContext) {
+      const ws = context.switchToWs();
+      const client = ws.getClient<Client>();
+      client[USER_OF] = (call) => byMessage.get(call.getArgs());
+      if (this.reflector.get('test:public', context.getHandler())) {
+        byMessage.set(context.getArgs(), null);
+        return true;
+      }
+
+      await sleep(ws.getData()?.delay ?? 0); // a slow session store
+      const user = sessions.get(client.session!) ?? null;
+      byMessage.set(context.getArgs(), user);
+      client.user = user;
+      if (!user) {
+        throw new WsException({ status: 'error', message: 'Session expired', statusCode: 401 });
+      }
+      return true;
+    }
+  }
+
+  @WebSocketGateway({ path: '/rooms' })
+  class RoomsGateway implements OnGatewayConnection {
+    /** The handshake, where a session cookie would be read. */
+    handleConnection(client: Client, request: IncomingMessage) {
+      client.session = new URL(request.url!, 'http://x').searchParams.get('session') ?? undefined;
+      client.user = sessions.get(client.session!) ?? null;
+    }
+
+    @SubscribeMessage('post')
+    @Can(PostPolicy, 'create')
+    post() {
+      return { event: 'posted', data: true };
+    }
+
+    @Public()
+    @SubscribeMessage('publish')
+    @Can(PostPolicy, 'create')
+    publish() {
+      return { event: 'published', data: true };
+    }
+  }
+
+  @Module({
+    imports: [AuthorizationModule.forRoot({ policies: [PostPolicy] })],
+    providers: [{ provide: APP_GUARD, useClass: SessionGuard }, RoomsGateway],
+  })
+  class RoomsAppModule {}
+
+  let app: INestApplication;
+  let base: string;
+  const sockets: WebSocket[] = [];
+  const denials: AuthorizationDeniedEvent[] = [];
+
+  /** A socket whose handshake names `session`. `next()` resolves its replies in order. */
+  const connect = async (session: string) => {
+    const socket = new WebSocket(`${base}/rooms?session=${session}`);
+    sockets.push(socket);
+    const replies: unknown[] = [];
+    const waiting: ((reply: unknown) => void)[] = [];
+    socket.on('message', (raw) => {
+      const reply = JSON.parse(String(raw));
+      const waiter = waiting.shift();
+      if (waiter) {
+        waiter(reply);
+      } else {
+        replies.push(reply);
+      }
+    });
+    await new Promise((resolve, reject) => socket.once('open', resolve).once('error', reject));
+
+    const send = (event: string, data: object = {}) => socket.send(JSON.stringify({ event, data }));
+    const next = () => (replies.length ? Promise.resolve(replies.shift()) : new Promise((resolve) => waiting.push(resolve)));
+    return { send, next, ask: (event: string, data?: object) => (send(event, data), next()) };
+  };
+  const unauthenticated = { event: 'exception', data: { status: 'error', message: 'Unauthorized', statusCode: 401 } };
+
+  beforeAll(async () => {
+    app = await createApp('express', RoomsAppModule, { setup: (a) => void a.useWebSocketAdapter(new WsAdapter(a)) });
+    base = `ws://127.0.0.1:${(app.getHttpServer().address() as AddressInfo).port}`;
+    app.get(AuthorizationEvents).events$.subscribe((event) => denials.push(event));
+  });
+  afterEach(() => {
+    sockets.splice(0).forEach((socket) => socket.close());
+    sessions.clear();
+    denials.length = 0;
+  });
+  afterAll(() => app.close());
+
+  it('evaluates a @Public() @Can() message after a sign-out everywhere as a guest, with no protected message in between', async () => {
+    sessions.set('stolen', users.alice);
+    const socket = await connect('stolen');
+    expect(await socket.ask('post')).toEqual({ event: 'posted', data: true });
+
+    sessions.delete('stolen'); // Alice signs out everywhere; the socket keeps `client.user`.
+    expect(await socket.ask('publish')).toEqual(unauthenticated);
+    expect(denials).toEqual([
+      expect.objectContaining({ ability: 'create', reason: 'unauthenticated', user: null, handler: 'RoomsGateway.publish' }),
+    ]);
+
+    expect(await socket.ask('post')).toEqual({
+      event: 'exception',
+      data: { status: 'error', message: 'Session expired', statusCode: 401 },
+    });
+  });
+
+  it('evaluates concurrent public and protected messages on one socket each as its own', async () => {
+    sessions.set('alice', users.alice);
+    const socket = await connect('alice');
+
+    socket.send('post', { delay: 30 }); // still checking the session...
+    socket.send('publish'); // ...when this one is authorized
+    expect(await socket.next()).toEqual(unauthenticated);
+    expect(await socket.next()).toEqual({ event: 'posted', data: true });
+    expect(denials).toEqual([expect.objectContaining({ user: null, handler: 'RoomsGateway.publish' })]);
   });
 });
 

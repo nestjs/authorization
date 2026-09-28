@@ -1,4 +1,5 @@
 import type { ExecutionContext } from '@nestjs/common';
+import { AUTHENTICATION_USER_OF } from '../authorization.constants.js';
 
 /**
  * @internal The user a policy sees: `null` for a guest. `undefined` (no user
@@ -11,7 +12,9 @@ export const toPolicyUser = (user: unknown): unknown => (user === undefined || u
  * The default `getUser`: where `@nestjs/authentication`, Passport and most
  * auth guards leave the user.
  * - `http`: `request.user`
- * - `ws`: `client.user`, else `client.data.user` (socket.io's per-socket bag)
+ * - `ws`: the user authentication recorded for this message, when it answers
+ *   (below); else `client.user`, else `client.data.user` (socket.io's
+ *   per-socket bag)
  * - `rpc`: `user` on the transport context (`ctx.switchToRpc().getContext()`),
  *   where an authentication guard or interceptor puts it. Never the message
  *   payload: whoever sends the message writes that.
@@ -20,6 +23,15 @@ export const toPolicyUser = (user: unknown): unknown => (user === undefined || u
  *
  * A `null` user is an answer (authentication ran, and the caller is
  * anonymous), so only `undefined` looks further.
+ *
+ * A ws client is the connection, not the message: `client.user` holds what
+ * the last authenticated message left there, so a `@Public()` message, which
+ * authenticates nothing, would be checked as that user, even after the
+ * session was revoked. Authentication that records each message's user
+ * leaves a function on the client, `client[Symbol.for('nestjs.authentication.userOf')]`:
+ * called with the execution context, it returns this message's user, `null`
+ * when the message is anonymous (a `@Public()` one is), or `undefined` when
+ * it has no answer. `@nestjs/authentication` does.
  */
 export function defaultGetUser(context: ExecutionContext): unknown {
   switch (context.getType<string>()) {
@@ -27,6 +39,11 @@ export function defaultGetUser(context: ExecutionContext): unknown {
       return context.switchToHttp().getRequest()?.user;
     case 'ws': {
       const client = context.switchToWs().getClient();
+      const userOf = client?.[AUTHENTICATION_USER_OF];
+      const own = typeof userOf === 'function' ? userOf.call(client, context) : undefined;
+      if (own !== undefined) {
+        return own;
+      }
       return client?.user !== undefined ? client.user : client?.data?.user;
     }
     case 'rpc':

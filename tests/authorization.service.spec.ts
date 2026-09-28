@@ -311,4 +311,35 @@ describe('defaultGetUser', () => {
     expect(defaultGetUser(ctx('ws', { client: { user: null, data: { user: 'stale' } } }))).toBeNull();
     expect(defaultGetUser(ctx('rpc', { rpcContext: { user: null }, data: { user: 'forged' } }))).toBeNull();
   });
+
+  describe("on ws, the message's own user, when the client's authentication answers for it", () => {
+    const USER_OF = Symbol.for('nestjs.authentication.userOf');
+
+    it("prefers it to the connection's client.user, and keeps its null (a @Public() message)", () => {
+      const userOf = vi.fn((_context: ExecutionContext): unknown => null);
+      const client = { user: 'last', data: { user: 'sio' }, [USER_OF]: userOf };
+      const context = ctx('ws', { client });
+
+      expect(defaultGetUser(context)).toBeNull();
+      expect(userOf).toHaveBeenCalledWith(context);
+      expect(userOf.mock.contexts[0]).toBe(client);
+
+      userOf.mockReturnValue('this message');
+      expect(defaultGetUser(context)).toBe('this message');
+    });
+
+    it('falls back to client.user, then data.user, when it answers undefined or is not a function', () => {
+      expect(defaultGetUser(ctx('ws', { client: { user: 'w', [USER_OF]: () => undefined } }))).toBe('w');
+      expect(defaultGetUser(ctx('ws', { client: { data: { user: 'sio' }, [USER_OF]: () => undefined } }))).toBe('sio');
+      expect(defaultGetUser(ctx('ws', { client: { user: 'w', [USER_OF]: { user: 'x' } } }))).toBe('w');
+    });
+
+    it('is asked only on ws, where the client outlives the call', () => {
+      const userOf = vi.fn(() => 'asked');
+      expect(defaultGetUser(ctx('http', { request: { user: 'h', [USER_OF]: userOf } }))).toBe('h');
+      expect(defaultGetUser(ctx('rpc', { rpcContext: { user: 'c', [USER_OF]: userOf } }))).toBe('c');
+      expect(defaultGetUser(ctx('graphql', { args: [{}, {}, { req: { user: 'g', [USER_OF]: userOf } }] }))).toBe('g');
+      expect(userOf).not.toHaveBeenCalled();
+    });
+  });
 });

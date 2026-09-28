@@ -17,3 +17,11 @@ export const AUTHORIZATION_GUARD = Symbol.for('@nestjs/authorization:guard');
  * without depending on that package.
  */
 export const AUTHENTICATION_GUARD = Symbol.for('@nestjs/authentication:guard');
+
+/**
+ * Where `@nestjs/authentication` leaves, on a ws client, the function that
+ * answers with the user of one message: `client[AUTHENTICATION_USER_OF](context)`.
+ * The client is the connection, which outlives its messages. A registry
+ * symbol too, so it is found without depending on that package.
+ */
+export const AUTHENTICATION_USER_OF = Symbol.for('nestjs.authentication.userOf');
