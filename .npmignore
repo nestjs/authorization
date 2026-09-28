@@ -10,6 +10,7 @@ tsconfig.json
 CONTRIBUTING.md
 renovate.json
 # tooling
+.claude
 .husky
 .commitlintrc.json
 .release-it.json
