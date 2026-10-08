@@ -24,9 +24,11 @@ import type { CanRequirement } from '../interfaces/can-requirement.interface.js'
  * A handler with no `@Can()`, no `@Can.Anyone()` and no `@Public()` from
  * `@nestjs/authentication` is denied.
  */
-export function Can<P, const A extends CanAbility<P>>(
+// `A` is inferred unconstrained and checked by the parameter type, so a name
+// that is not a route ability is the error, rather than a missing resolver.
+export function Can<P, const A extends string>(
   policy: Type<P>,
-  ability: A,
+  ability: A extends CanAbility<P> ? A : CanAbility<P>,
   ...resolver: CanArgs<P, A>
 ): ClassDecorator & MethodDecorator {
   const [args] = resolver;

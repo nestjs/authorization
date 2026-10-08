@@ -51,8 +51,8 @@ export type RouteAbility<P> = {
  */
 export type CanAbility<P> = [RouteAbility<P>] extends [never]
   ? 'no ability of this policy works in @Can(): its user parameter must be typed User | null'
-  : // Extract re-lists the names, so errors show them instead of the alias.
-    Extract<keyof P, RouteAbility<P>>;
+  : // Through a template literal, errors list the names even when they are every key of P.
+    `${RouteAbility<P> & string}`;
 
 /**
  * Reads the arguments after the user for ability `A` from the call: route
@@ -67,13 +67,13 @@ export type CanArgsResolver<P, A extends keyof P> = (
 /**
  * The rest of `@Can()`'s parameters for ability `A`: a resolver when the
  * ability takes arguments after the user, optional when they are all
- * optional.
+ * optional. Anything goes for a name that is not a route ability, so the
+ * error is about the name, not a missing resolver.
  */
-// Not distributive: an ability cast to `never` (in tests) leaves the resolver optional.
 export type CanArgs<P, A> = [A] extends [never]
-  ? [args?: (context: ExecutionContext) => unknown[]]
-  : A extends keyof P
-    ? [] extends AbilityArgs<P, A>
-      ? [args?: CanArgsResolver<P, A>]
-      : [args: CanArgsResolver<P, A>]
-    : [];
+  ? [args?: (context: ExecutionContext) => readonly unknown[]]
+  : [A] extends [CanAbility<P> & keyof P]
+    ? [] extends AbilityArgs<P, A & keyof P>
+      ? [args?: CanArgsResolver<P, A & keyof P>]
+      : [args: CanArgsResolver<P, A & keyof P>]
+    : [args?: (context: ExecutionContext) => readonly unknown[]];
