@@ -3,6 +3,7 @@
  * `tsc --noEmit -p tsconfig.json`; if any of them stops being an error,
  * tsc fails with "Unused '@ts-expect-error' directive".
  */
+import type { ExecutionContext } from '@nestjs/common';
 import type { Ability, AuthorizationService, PolicyBefore } from '../lib/index.js';
 import { AuthorizationModule, Can, Policy } from '../lib/index.js';
 import { CommentPolicy, PostPolicy, users, type Post, type User } from './fixtures.js';
@@ -18,8 +19,39 @@ async function typeChecks(authz: AuthorizationService, maybeUser: User | null, p
     @Can(PostPolicy, 'craete') a() {}
   }
   class NeedsRecord {
-    // @ts-expect-error 'view' needs a Post, which a route cannot provide
+    // @ts-expect-error 'view' needs a Post: without a resolver, a route cannot provide it
     @Can(PostPolicy, 'view') a() {}
+  }
+
+  const workoutIdOf = (context: ExecutionContext) => [context.switchToHttp().getRequest().params.workoutId as string] as const;
+  const untuple = (context: ExecutionContext) => [context.switchToHttp().getRequest().params.workoutId as string];
+  // A resolver reads the arguments after the user, typed by the ability's own parameters.
+  class WithArgs {
+    @Can(WorkoutPolicy, 'view', (context) => [context.switchToHttp().getRequest().params.workoutId]) a() {}
+    @Can(WorkoutPolicy, 'view', async () => ['w1']) b() {}
+    @Can(WorkoutPolicy, 'logSet', () => ['w1', 3]) c() {}
+    // Optional where every argument after the user is.
+    @Can(WorkoutPolicy, 'list') d() {}
+    @Can(WorkoutPolicy, 'list', () => [{ archived: true }]) e() {}
+    // A resolver declared on its own infers an array: `as const` makes it the tuple.
+    @Can(WorkoutPolicy, 'view', workoutIdOf) f() {}
+  }
+  class WrongArgs {
+    // @ts-expect-error string[] may be empty: the ability needs exactly its workout id
+    @Can(WorkoutPolicy, 'view', untuple) z() {}
+    // @ts-expect-error the workout id is a string
+    @Can(WorkoutPolicy, 'view', () => [1]) a() {}
+    // @ts-expect-error logSet takes the reps too
+    @Can(WorkoutPolicy, 'logSet', () => ['w1']) b() {}
+    // @ts-expect-error view needs its workout id: no resolver, no id
+    @Can(WorkoutPolicy, 'view') c() {}
+    // @ts-expect-error list takes no workout id
+    @Can(WorkoutPolicy, 'list', () => ['w1', 3]) d() {}
+  }
+  class GuestUnsafeWithArgs {
+    // A resolver does not make an ability that rejects a guest usable on a route.
+    // @ts-expect-error edit(user: User, ...) does not accept null
+    @Can(WorkoutPolicy, 'edit', () => ['w1']) a() {}
   }
   class NotAnAbility {
     // @ts-expect-error helper methods that do not return boolean are not abilities
@@ -65,7 +97,7 @@ async function typeChecks(authz: AuthorizationService, maybeUser: User | null, p
   // @ts-expect-error decide() is internal
   authz.decide;
 
-  return [Ok, Typo, NeedsRecord, NotAnAbility, GuestUnsafe, NoRouteAbilities];
+  return [Ok, Typo, NeedsRecord, WithArgs, WrongArgs, GuestUnsafeWithArgs, NotAnAbility, GuestUnsafe, NoRouteAbilities];
 }
 
 // ---- before() must accept a guest ---------------------------------------
@@ -140,6 +172,21 @@ AuthorizationModule.forRoot({ policies: [PostPolicy], getUser: async () => users
 class StrictPolicy {
   publish(user: User) {
     return user.roles.includes('editor');
+  }
+}
+
+class WorkoutPolicy {
+  list(_user: User | null, _filter?: { archived: boolean }) {
+    return true;
+  }
+  view(user: User | null, workoutId: string) {
+    return !!user && workoutId !== '';
+  }
+  logSet(user: User | null, workoutId: string, reps: number) {
+    return !!user && workoutId !== '' && reps > 0;
+  }
+  edit(user: User, workoutId: string) {
+    return user.id > 0 && workoutId !== '';
   }
 }
 
