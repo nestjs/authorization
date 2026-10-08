@@ -5,12 +5,16 @@ import {
   Logger,
   Module,
   Scope,
+  SetMetadata,
   UseGuards,
   type CanActivate,
   type ExecutionContext,
   type INestApplication,
 } from '@nestjs/common';
 import { APP_GUARD, LazyModuleLoader } from '@nestjs/core';
+import { Query as GraphqlQuery, ResolveField } from '@nestjs/graphql';
+import { MessagePattern } from '@nestjs/microservices';
+import { SubscribeMessage } from '@nestjs/websockets';
 import { Test, type TestingModuleBuilder } from '@nestjs/testing';
 import request from 'supertest';
 import {
@@ -435,6 +439,120 @@ describe('AuthorizationModule', () => {
       @Module({ imports: [AuthorizationModule.forRoot()], providers: [RequestClock, ClockPolicy] })
       class ClockModule {}
       await expect(boot(ClockModule)).rejects.toThrow(`ClockPolicy depends on a request-scoped provider. ${fix}`);
+    });
+
+    describe('handlers that declare no check', () => {
+      /** Stands in for `@nestjs/authentication`'s `@Public()`: it records the route as public under this symbol. */
+      const Public = () => SetMetadata(Symbol.for('@nestjs/authentication:public'), true);
+      const fix =
+        'Add @Can(), or @Can.Anyone() where anyone may call the handler ' +
+        '(a @Public() route from @nestjs/authentication needs neither).';
+
+      @Controller('mixed')
+      class MixedController {
+        @Get('forgotten')
+        forgotten() {}
+
+        @Get('anyone')
+        @Can.Anyone()
+        anyone() {}
+
+        @Get('public')
+        @Public()
+        public() {}
+
+        @Get('checked')
+        @Can(PostPolicy, 'create')
+        checked() {}
+
+        @MessagePattern('orders.list')
+        orders() {}
+
+        // Not a handler: Nest routes nothing to it.
+        helper() {}
+      }
+
+      @Controller('open')
+      @Can.Anyone()
+      class OpenController {
+        @Get()
+        list() {}
+      }
+
+      @Injectable()
+      class ChatGateway {
+        @SubscribeMessage('message')
+        message() {}
+      }
+
+      @Injectable()
+      class ReportsResolver {
+        @GraphqlQuery(() => String)
+        report() {}
+
+        @ResolveField(() => Number)
+        total() {}
+      }
+
+      it('logs every handler the guard denies, on every transport, without failing the startup', async () => {
+        @Module({
+          imports: [AuthorizationModule.forRoot({ policies: [PostPolicy] })],
+          controllers: [MixedController, OpenController],
+          providers: [ChatGateway, ReportsResolver],
+        })
+        class AppModule {}
+
+        app = await boot(AppModule);
+        expect(errors).toEqual([
+          'AuthorizationGuard denies every call to MixedController.forgotten, MixedController.orders, ' +
+            `ChatGateway.message, ReportsResolver.report: they declare no check. ${fix}`,
+        ]);
+        await request(app.getHttpServer()).get('/mixed/forgotten').expect(401);
+        await request(app.getHttpServer()).get('/mixed/anyone').expect(200);
+        await request(app.getHttpServer()).get('/mixed/public').expect(200);
+        await request(app.getHttpServer()).get('/open').expect(200);
+      });
+
+      it('names field resolvers only when GraphQL runs guards on them', async () => {
+        @Module({
+          imports: [AuthorizationModule.forRoot()],
+          providers: [
+            ReportsResolver,
+            { provide: 'GqlModuleOptions', useValue: { fieldResolverEnhancers: ['guards'] } },
+          ],
+        })
+        class AppModule {}
+
+        app = await boot(AppModule);
+        expect(errors).toEqual([
+          `AuthorizationGuard denies every call to ReportsResolver.report, ReportsResolver.total: they declare no check. ${fix}`,
+        ]);
+      });
+
+      it('says nothing about handlers no AuthorizationGuard runs on, and names those @UseGuards() puts it on', async () => {
+        @Controller('guarded')
+        class GuardedController {
+          @Get('unguarded')
+          unguarded() {}
+
+          @Get('guarded')
+          @UseGuards(AuthorizationGuard)
+          guarded() {}
+        }
+
+        @Module({
+          imports: [AuthorizationModule.forRoot({ globalGuard: false })],
+          controllers: [GuardedController],
+        })
+        class AppModule {}
+
+        app = await boot(AppModule);
+        expect(errors).toEqual([
+          `AuthorizationGuard denies every call to GuardedController.guarded: it declares no check. ${fix}`,
+        ]);
+        await request(app.getHttpServer()).get('/guarded/unguarded').expect(200);
+        await request(app.getHttpServer()).get('/guarded/guarded').expect(401);
+      });
     });
 
     describe('guard order with other authentication guards (by name)', () => {

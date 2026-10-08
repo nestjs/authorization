@@ -116,6 +116,7 @@ describe.each(adapters.map((a) => a.name))('module setups over HTTP (%s)', (adap
       ) {}
 
       @Get()
+      @Can.Anyone()
       async export(@Req() req: { headers: Record<string, string> }) {
         await this.lazyModuleLoader.load(() => ExportsModule);
         await this.authorizationService.authorize(ExportPolicy, 'export', users[req.headers['x-user']]);
@@ -196,6 +197,7 @@ describe.each(adapters.map((a) => a.name))('module setups over HTTP (%s)', (adap
       }
 
       @Get('refund')
+      @Can.Anyone()
       async refund(@Req() req: { headers: Record<string, string>; query: { status: Order['status'] } }) {
         await this.authorizationService.authorize(OrderPolicy, 'refund', users[req.headers['x-user']], { id: 1, status: req.query.status });
         return 'refunded';

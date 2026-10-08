@@ -87,6 +87,7 @@ class RefundsController {
   }
 
   @MessagePattern('refunds.show')
+  @Can.Anyone()
   show() {
     return this.refundsService.show(null, 1);
   }
@@ -199,11 +200,13 @@ describe('GraphQL field resolvers that call authorize()', () => {
     constructor(private readonly salariesService: SalariesService) {}
 
     @Query('employees')
+    @Can.Anyone()
     employees(): Employee[] {
       return [{ id: 1, name: 'Alice' }];
     }
 
     @ResolveField('salary')
+    @Can.Anyone()
     salary(@Parent() employee: Employee) {
       return this.salariesService.salaryOf(null, employee);
     }
@@ -290,12 +293,14 @@ describe('guards of your own that run before the handler', () => {
   @Controller('reports')
   class ReportsController {
     @Get('checked')
+    @Can.Anyone()
     @UseGuards(ExportGuard)
     checked() {
       return 'csv';
     }
 
     @Get('escaped')
+    @Can.Anyone()
     @UseGuards(AuthorizingGuard)
     escaped() {
       return 'csv';

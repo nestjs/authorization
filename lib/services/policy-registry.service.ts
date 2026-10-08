@@ -1,9 +1,10 @@
 import { Injectable, Logger, Scope, type OnModuleInit, type Type } from '@nestjs/common';
 import { GUARDS_METADATA } from '@nestjs/common/constants.js';
 import { APP_GUARD, DiscoveryService, MetadataScanner, ModulesContainer } from '@nestjs/core';
-import { AUTHENTICATION_GUARD, AUTHORIZATION_GUARD, CAN_METADATA, POLICY_METADATA } from '../authorization.constants.js';
+import { AUTHENTICATION_GUARD, AUTHORIZATION_GUARD, POLICY_METADATA } from '../authorization.constants.js';
 import { MissingPolicyError } from '../errors/missing-policy.error.js';
 import type { CanRequirement } from '../interfaces/can-requirement.interface.js';
+import { routeChecks } from '../utils/route-checks.util.js';
 
 type Wrapper = ReturnType<DiscoveryService['getProviders']>[number];
 
@@ -103,6 +104,20 @@ const GRAPHQL_FIELD_RESOLVER = 'graphql:resolve_property';
 /** The injection token of `GraphQLModule`'s options. */
 const GRAPHQL_MODULE_OPTIONS = 'GqlModuleOptions';
 
+/**
+ * The metadata Nest puts on the methods it routes calls to: HTTP routes,
+ * message patterns, gateway messages, GraphQL queries, mutations,
+ * subscriptions and field resolvers.
+ */
+const HANDLER_METADATA = [
+  'method',
+  'microservices:pattern',
+  'websockets:message_mapping',
+  'graphql:resolver_type',
+  GRAPHQL_FIELD_RESOLVER,
+];
+const isHandler = (method: Function) => HANDLER_METADATA.some((key) => Reflect.getMetadata(key, method) !== undefined);
+
 interface CanTarget {
   /** `ProductsController.create`. */
   where: string;
@@ -112,6 +127,8 @@ interface CanTarget {
   guards: unknown[];
   /** A GraphQL `@ResolveField()`, which runs guards only when GraphQLModule says so. */
   fieldResolver: boolean;
+  /** `@Can.Anyone()` or `@Public()`: with no requirement, anyone may call it. */
+  open: boolean;
 }
 
 /**
@@ -191,9 +208,11 @@ export class PolicyRegistry implements OnModuleInit {
    * exist, sits on a GraphQL field resolver that GraphQL runs without guards,
    * or when `@nestjs/authentication`'s guard runs after the authorization
    * guard, so the policy would see every caller as a guest. Logs an error
-   * when a `@Can()` is not enforced by any guard, or when another guard runs
-   * after the authorization guard and looks like authentication: going by a
-   * class name is a guess, so it does not fail.
+   * when a `@Can()` is not enforced by any guard, when another guard runs
+   * after the authorization guard and looks like authentication (going by a
+   * class name is a guess, so it does not fail), and lists the handlers the
+   * guard denies because they declare no check: denying them is the
+   * intended outcome, so that does not fail either.
    */
   private verifyCanUsage() {
     const targets = this.collectCanTargets();
@@ -208,10 +227,20 @@ export class PolicyRegistry implements OnModuleInit {
     const missing = new Set<string>();
     const unguardedFields: string[] = [];
     const unenforced: string[] = [];
+    const undeclared: string[] = [];
     const misordered: Misordered = new Map(); // AuthenticationGuard, by its brand: fails
     const suspected: Misordered = new Map(); // other guards, by their names: logs
 
-    for (const { where, requirements, guards, fieldResolver } of targets) {
+    for (const { where, requirements, guards, fieldResolver, open } of targets) {
+      if (requirements.length === 0) {
+        // A route handler with no @Can(): denied, unless it is open or no guard runs on it.
+        const guarded = [...globalGuards, ...guards].some(isAuthorizationGuard);
+        if (!open && guarded && (!fieldResolver || guardsFieldResolvers === true)) {
+          undeclared.push(where);
+        }
+        continue;
+      }
+
       for (const { policy, ability, declaredOn } of requirements) {
         const instance = policies.get(policy);
         const at = `@Can(${policy.name}, '${ability}') on ${declaredOn}`;
@@ -287,9 +316,19 @@ export class PolicyRegistry implements OnModuleInit {
     for (const message of misorderMessages(suspected, false)) {
       this.logger.error(message);
     }
+    if (undeclared.length > 0) {
+      this.logger.error(
+        `AuthorizationGuard denies every call to ${undeclared.join(', ')}: ` +
+          `${undeclared.length === 1 ? 'it declares' : 'they declare'} no check. Add @Can(), or @Can.Anyone() ` +
+          `where anyone may call the handler (a @Public() route from @nestjs/authentication needs neither).`,
+      );
+    }
   }
 
-  /** Handlers of controllers and of class providers (resolvers, gateways) that `@Can()` applies to. */
+  /**
+   * Handlers of controllers and of class providers (resolvers, gateways):
+   * those `@Can()` applies to, and the route handlers that have none.
+   */
   private collectCanTargets(): CanTarget[] {
     const targets: CanTarget[] = [];
     const seen = new Set<Function>();
@@ -300,27 +339,29 @@ export class PolicyRegistry implements OnModuleInit {
       }
       seen.add(type);
 
-      const onClass: CanRequirement[] = Reflect.getMetadata(CAN_METADATA, type) ?? [];
       const classGuards: unknown[] = Reflect.getMetadata(GUARDS_METADATA, type) ?? [];
 
       for (const key of this.metadataScanner.getAllMethodNames(type.prototype)) {
         const method = type.prototype[key];
-        const onMethod: CanRequirement[] = Reflect.getMetadata(CAN_METADATA, method) ?? [];
+        const { onClass, onMethod, open } = routeChecks(type, method);
         // A class-level @Can() covers the handlers: decorated methods, not helpers.
         const covered = onClass.length > 0 && Reflect.getOwnMetadataKeys(method).length > 0;
-        if (onMethod.length === 0 && !covered) {
+        if (onMethod.length === 0 && !covered && !isHandler(method)) {
           continue;
         }
+        // An undecorated method under a class-level @Can() is a helper: no requirement applies to it.
+        const fromClass = covered ? onClass : [];
 
         const where = `${type.name}.${key}`;
         targets.push({
           where,
           requirements: [
-            ...onClass.map((requirement) => ({ ...requirement, declaredOn: type.name })),
+            ...fromClass.map((requirement) => ({ ...requirement, declaredOn: type.name })),
             ...onMethod.map((requirement) => ({ ...requirement, declaredOn: where })),
           ],
           guards: [...classGuards, ...(Reflect.getMetadata(GUARDS_METADATA, method) ?? [])],
           fieldResolver: Reflect.getMetadata(GRAPHQL_FIELD_RESOLVER, method) === true,
+          open,
         });
       }
     }

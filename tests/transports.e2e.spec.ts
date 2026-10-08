@@ -81,6 +81,7 @@ describe('WebSocket gateway (platform-ws)', () => {
     }
 
     @SubscribeMessage('draft')
+    @Can.Anyone()
     async show(client: { user?: (typeof users)[string] }) {
       return { event: 'draft', data: await this.drafts.show(client.user ?? null) };
     }
@@ -310,6 +311,7 @@ describe('GraphQL (Apollo, express)', () => {
     }
 
     @Query('draft')
+    @Can.Anyone()
     draft() {
       return this.drafts.show(null);
     }
@@ -523,6 +525,7 @@ describe('GraphQL field resolvers', () => {
   @Resolver('Employee')
   class EmployeesResolver {
     @Query('employees')
+    @Can.Anyone()
     employees() {
       return [{ name: 'Sam' }];
     }
@@ -698,6 +701,7 @@ describe('microservice over TCP (a real transport)', () => {
     }
 
     @MessagePattern('drafts.show')
+    @Can.Anyone()
     show() {
       return this.drafts.show(null);
     }

@@ -18,7 +18,7 @@ import { PolicyRegistry } from './services/policy-registry.service.js';
  * `forRootAsync({ imports, inject, useFactory | useClass | useExisting })`.
  *
  * Provides `AuthorizationService`, registers `AuthorizationGuard` globally
- * (it only acts on handlers with `@Can()`), and turns an `AuthorizationError`
+ * (it denies handlers that declare no check), and turns an `AuthorizationError`
  * leaving a handler into the transport's 401/403. Policies are found
  * wherever they are registered as providers.
  */

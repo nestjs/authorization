@@ -11,7 +11,9 @@ export type DenialReason = 'unauthenticated' | 'forbidden';
  * handlers.
  *
  * The message is only `Unauthorized` or `Forbidden`; `policy` and `ability`
- * say which check denied, for logs.
+ * say which check denied, for logs. Both are `null` when the guard denied a
+ * handler that declares no check: no `@Can()`, `@Can.Anyone()` or
+ * `@Public()`.
  */
 export class AuthorizationError extends Error {
   /**
@@ -24,10 +26,10 @@ export class AuthorizationError extends Error {
 
   constructor(
     readonly reason: DenialReason,
-    /** The policy class name, e.g. `OrderPolicy`. */
-    readonly policy: string,
-    /** The ability that denied, e.g. `refund`. */
-    readonly ability: string,
+    /** The policy class name, e.g. `OrderPolicy`; `null` for a handler that declares no check. */
+    readonly policy: string | null,
+    /** The ability that denied, e.g. `refund`; `null` for a handler that declares no check. */
+    readonly ability: string | null,
   ) {
     super(reason === 'unauthenticated' ? 'Unauthorized' : 'Forbidden');
     this.name = 'AuthorizationError';

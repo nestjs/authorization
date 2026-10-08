@@ -1,19 +1,21 @@
 import { Inject, Injectable, type CanActivate, type ExecutionContext } from '@nestjs/common';
-import { AUTHORIZATION_GUARD, AUTHORIZATION_MODULE_OPTIONS, CAN_METADATA } from '../authorization.constants.js';
-import { AuthorizationError } from '../errors/authorization.error.js';
+import { AUTHORIZATION_GUARD, AUTHORIZATION_MODULE_OPTIONS } from '../authorization.constants.js';
+import { AuthorizationError, type DenialReason } from '../errors/authorization.error.js';
 import { AuthorizationEvents } from '../events/authorization-events.service.js';
 import { defaultGetUser, toPolicyUser } from '../utils/get-user.util.js';
+import { routeChecks } from '../utils/route-checks.util.js';
 import { PolicyEvaluator } from '../services/policy-evaluator.service.js';
 import { toTransportError } from '../utils/transport-error.util.js';
 import type { AuthorizationModuleOptions } from '../interfaces/authorization-module-options.interface.js';
-import type { CanRequirement } from '../interfaces/can-requirement.interface.js';
 
 /**
  * Enforces `@Can()` requirements (class-level first, then method-level; all
- * must pass), each with the arguments its resolver reads from the call.
- * Handlers without `@Can()` pass through untouched. Whether a
- * route needs a user is authentication's business: with no user, policies
- * run with `null`, and a denial becomes 401 instead of 403.
+ * must pass; a method's `@Can.Anyone()` or `@Public()` lifts the class's),
+ * each with the arguments its resolver reads from the call. Denies by
+ * default: a handler with no `@Can()` runs only when it, or its class, has
+ * `@Can.Anyone()` or `@nestjs/authentication`'s `@Public()`. Whether a route
+ * needs a user is authentication's business: with no user, policies run with
+ * `null`, and a denial becomes 401 instead of 403.
  *
  * Registered globally by default. With `globalGuard: false`, list it after
  * your authentication guard: `@UseGuards(JwtAuthGuard, AuthorizationGuard)`.
@@ -29,16 +31,19 @@ export class AuthorizationGuard implements CanActivate {
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const requirements: CanRequirement[] = [
-      ...(Reflect.getMetadata(CAN_METADATA, context.getClass()) ?? []),
-      ...(Reflect.getMetadata(CAN_METADATA, context.getHandler()) ?? []),
-    ];
-    if (requirements.length === 0) {
+    const { onClass, onMethod, open } = routeChecks(context.getClass(), context.getHandler());
+    const requirements = [...onClass, ...onMethod];
+    if (requirements.length === 0 && open) {
       return true;
     }
 
     // A forRootAsync() factory may resolve to nothing: every option is optional.
     const user = toPolicyUser(await (this.options?.getUser ?? defaultGetUser)(context));
+    if (requirements.length === 0) {
+      // Declares no check: a forgotten @Can() must not open the route.
+      return this.deny(context, user === null ? 'unauthenticated' : 'forbidden', user, null, null, []);
+    }
+
     for (const { policy, ability, args: resolve } of requirements) {
       // Resolved per requirement, in order: once one denies, later resolvers do not run.
       const args = resolve ? await resolve(context) : [];
@@ -49,15 +54,24 @@ export class AuthorizationGuard implements CanActivate {
         );
       }
       const decision = await this.evaluator.decide(policy, ability, user, args);
-      if (decision === 'allow') {
-        continue;
+      if (decision !== 'allow') {
+        return this.deny(context, decision, user, policy.name, ability, args);
       }
-
-      const handler = `${context.getClass().name}.${context.getHandler().name}`;
-      this.events.emit({ type: 'denied', policy: policy.name, ability, reason: decision, user, args, handler });
-      throw await toTransportError(context, new AuthorizationError(decision, policy.name, ability));
     }
 
     return true;
+  }
+
+  private async deny(
+    context: ExecutionContext,
+    reason: DenialReason,
+    user: unknown,
+    policy: string | null,
+    ability: string | null,
+    args: readonly unknown[],
+  ): Promise<never> {
+    const handler = `${context.getClass().name}.${context.getHandler().name}`;
+    this.events.emit({ type: 'denied', policy, ability, reason, user, args, handler });
+    throw await toTransportError(context, new AuthorizationError(reason, policy, ability));
   }
 }

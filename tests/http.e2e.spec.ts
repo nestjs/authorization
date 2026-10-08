@@ -78,13 +78,20 @@ class ReportsController {
   }
 
   @Get('archive')
+  @Can.Anyone()
   archive(@Req() req: { user?: User }) {
     return this.reportsService.archive(req.user ?? null);
   }
 
   @Get('missing')
+  @Can.Anyone()
   missing() {
     throw new NotFoundException('No such report');
+  }
+
+  @Get('forgotten')
+  forgotten() {
+    return { leaked: true };
   }
 }
 
@@ -114,11 +121,14 @@ class ReportsAppModule {}
 
 describe.each(adapters.map((a) => a.name))('HTTP denials and failures (%s)', (adapter) => {
   let app: INestApplication;
+  const errors: unknown[] = [];
 
   beforeAll(async () => {
-    // The guest warning and the 500's stack trace are expected here.
+    // The guest warning, the 500's stack trace and the undeclared route are expected here.
     vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
-    vi.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    vi.spyOn(Logger.prototype, 'error').mockImplementation((message: unknown) => {
+      errors.push(message);
+    });
     app = await createApp(adapter, ReportsAppModule);
   });
   afterAll(async () => {
@@ -157,6 +167,23 @@ describe.each(adapters.map((a) => a.name))('HTTP denials and failures (%s)', (ad
       .get('/reports/missing')
       .expect(404, { message: 'No such report', error: 'Not Found', statusCode: 404 });
     expect(logged).toEqual([{ status: 404, cause: undefined }]);
+  });
+
+  it('denies a route that declares no check, and names it at startup', async () => {
+    await request(app.getHttpServer()).get('/reports/forgotten').expect(401, { message: 'Unauthorized', statusCode: 401 });
+    await request(app.getHttpServer())
+      .get('/reports/forgotten')
+      .set('x-user', 'root')
+      .expect(403, { message: 'Forbidden', statusCode: 403 });
+
+    expect(logged.map(({ cause }) => cause)).toEqual([
+      expect.objectContaining({ reason: 'unauthenticated', policy: null, ability: null }),
+      expect.objectContaining({ reason: 'forbidden', policy: null, ability: null }),
+    ]);
+    expect(errors).toContain(
+      'AuthorizationGuard denies every call to ReportsController.forgotten: it declares no check. Add @Can(), ' +
+        'or @Can.Anyone() where anyone may call the handler (a @Public() route from @nestjs/authentication needs neither).',
+    );
   });
 
 });

@@ -13,10 +13,14 @@ import type { DenialReason } from '../errors/authorization.error.js';
  */
 export interface AuthorizationDeniedEvent {
   type: 'denied';
-  /** The policy class name, e.g. `OrderPolicy`. */
-  policy: string;
-  /** The ability that denied, e.g. `refund`. */
-  ability: string;
+  /**
+   * The policy class name, e.g. `OrderPolicy`. `null` when the guard denied
+   * a handler that declares no check: no `@Can()`, `@Can.Anyone()` or
+   * `@Public()`.
+   */
+  policy: string | null;
+  /** The ability that denied, e.g. `refund`; `null` with `policy`. */
+  ability: string | null;
   /** `unauthenticated` (no user, 401) or `forbidden` (403). */
   reason: DenialReason;
   /** The user the policy saw; `null` for a guest. */

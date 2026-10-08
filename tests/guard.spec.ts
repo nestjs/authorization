@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   HttpException,
   NotFoundException,
+  SetMetadata,
   UnauthorizedException,
   type ExecutionContext,
 } from '@nestjs/common';
@@ -89,6 +90,10 @@ const httpContext = (type: Function, handler: Function, user?: unknown) =>
     switchToHttp: () => ({ getRequest: () => ({ user }) }),
   }) as unknown as ExecutionContext;
 
+/** Stand in for `@nestjs/authentication`'s decorators: they record whether a route is public under this symbol. */
+const Public = () => SetMetadata(Symbol.for('@nestjs/authentication:public'), true);
+const Authenticate = () => SetMetadata(Symbol.for('@nestjs/authentication:public'), false);
+
 /** An `http` context whose request carries `user` and route `params`. */
 const requestContext = (type: Function, handler: Function, user: unknown, params: Record<string, string>) =>
   ({
@@ -171,6 +176,26 @@ describe('AuthorizationGuard', () => {
     expect(error.cause).toMatchObject({ policy: 'SteppingPolicy', ability: 'second', reason: 'forbidden' });
   });
 
+  it('denies a handler that declares no check: 403 for a user, 401 for a guest, naming no policy', async () => {
+    const plain = class PlainController {
+      handler() {}
+    };
+
+    const error = (await guard
+      .canActivate(httpContext(plain, plain.prototype.handler, users.alice))
+      .catch((e: unknown) => e)) as HttpException;
+    expect(error).toBeInstanceOf(ForbiddenException);
+    expect(error.cause).toMatchObject({ policy: null, ability: null, reason: 'forbidden' });
+    await expect(guard.canActivate(httpContext(plain, plain.prototype.handler))).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+    const denial = { type: 'denied', policy: null, ability: null, args: [], handler: 'PlainController.handler' };
+    expect(denials).toEqual([
+      { ...denial, reason: 'forbidden', user: users.alice },
+      { ...denial, reason: 'unauthenticated', user: null },
+    ]);
+  });
+
   describe('arguments read from the call', () => {
     const findOne = (user: User | undefined, workoutId: string) =>
       requestContext(WorkoutsController, WorkoutsController.prototype.findOne, user, { workoutId });
@@ -241,19 +266,106 @@ describe('AuthorizationGuard', () => {
     });
   });
 
-  it('lets a handler without @Can() through without asking for the user', async () => {
+  it('lets @Can.Anyone() and @Public(), on the method or the class, through without asking for the user', async () => {
     const getUser = vi.fn();
     const custom = await Test.createTestingModule({
       imports: [AuthorizationModule.forRoot({ policies: [SteppingPolicy], getUser })],
     }).compile();
     await custom.init();
 
-    const plain = class PlainController {
+    class OpenMethods {
+      @Can.Anyone()
+      anyone() {}
+      @Public()
+      public() {}
+    }
+    @Can.Anyone()
+    class AnyoneClass {
       handler() {}
-    };
-    expect(await custom.get(AuthorizationGuard).canActivate(httpContext(plain, plain.prototype.handler))).toBe(true);
+    }
+    @Public()
+    class PublicClass {
+      handler() {}
+    }
+
+    const guardOf = custom.get(AuthorizationGuard);
+    for (const [type, handler] of [
+      [OpenMethods, OpenMethods.prototype.anyone],
+      [OpenMethods, OpenMethods.prototype.public],
+      [AnyoneClass, AnyoneClass.prototype.handler],
+      [PublicClass, PublicClass.prototype.handler],
+    ] as const) {
+      expect(await guardOf.canActivate(httpContext(type, handler))).toBe(true);
+    }
     expect(getUser).not.toHaveBeenCalled();
     await custom.close();
+  });
+
+  it('denies a method that @Authenticate() takes out of a @Public() class, unless it declares a check', async () => {
+    @Public()
+    class Reopened {
+      @Authenticate()
+      undeclared() {}
+      @Authenticate()
+      @Can.Anyone()
+      anyone() {}
+    }
+
+    await expect(
+      guard.canActivate(httpContext(Reopened, Reopened.prototype.undeclared, users.alice)),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(await guard.canActivate(httpContext(Reopened, Reopened.prototype.anyone, users.alice))).toBe(true);
+  });
+
+  it("lets a method's @Can.Anyone() or @Public() lift the class's @Can(), not its own", async () => {
+    @Can(SteppingPolicy, 'first')
+    class Mixed {
+      @Can.Anyone()
+      anyone() {}
+      @Public()
+      public() {}
+      @Public()
+      @Can(SteppingPolicy, 'second')
+      publicChecked() {}
+      @Authenticate()
+      reopened() {}
+    }
+
+    expect(await guard.canActivate(httpContext(Mixed, Mixed.prototype.anyone))).toBe(true);
+    expect(await guard.canActivate(httpContext(Mixed, Mixed.prototype.public))).toBe(true);
+    expect(evaluated).toEqual([]);
+
+    // A @Public() route runs its own @Can() for a guest.
+    await expect(guard.canActivate(httpContext(Mixed, Mixed.prototype.publicChecked))).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+    expect(evaluated).toEqual(['second']);
+    // @Authenticate() is not public: the class's @Can() applies.
+    await expect(guard.canActivate(httpContext(Mixed, Mixed.prototype.reopened))).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+    expect(evaluated).toEqual(['second', 'first']);
+  });
+
+  it("does not let a class's @Can.Anyone() or @Public() lift a method's @Can()", async () => {
+    @Can.Anyone()
+    class AnyoneClass {
+      @Can(SteppingPolicy, 'first')
+      checked() {}
+    }
+    @Public()
+    class PublicClass {
+      @Can(SteppingPolicy, 'first')
+      checked() {}
+    }
+
+    await expect(
+      guard.canActivate(httpContext(AnyoneClass, AnyoneClass.prototype.checked)),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    await expect(
+      guard.canActivate(httpContext(PublicClass, PublicClass.prototype.checked)),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(evaluated).toEqual(['first', 'first']);
   });
 
   it('asks a custom getUser once per request, with the execution context, however many requirements apply', async () => {

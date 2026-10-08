@@ -8,7 +8,7 @@ import { Controller, Get, Injectable, Logger, Module, Query, type INestApplicati
 import request from 'supertest';
 import { adapters, createApp } from './support/adapters.js';
 import { CircuitBreaker, Fallback, ResilienceEvents, ResilienceModule, Retry, type ResilienceEvent } from '@nestjs/resilience';
-import { AuthorizationModule, AuthorizationService, Policy } from '../lib/index.js';
+import { AuthorizationModule, AuthorizationService, Can, Policy } from '../lib/index.js';
 import { users, type User } from './fixtures.js';
 
 @Policy()
@@ -39,12 +39,14 @@ class ReportsController {
   constructor(private readonly reportsService: ReportsService) {}
 
   @Get('export')
+  @Can.Anyone()
   @CircuitBreaker({ name: 'warehouse', minimumCalls: 2, slidingWindow: { type: 'count', size: 2 }, failureRateThreshold: 50 })
   export(@Query('user') name: string | undefined, @Query('fail') fail?: string) {
     return this.reportsService.export(name ? users[name] : null, fail === '1');
   }
 
   @Get('backup')
+  @Can.Anyone()
   @Retry({ attempts: 3, backoff: { delay: 1 } })
   @Fallback(() => ({ csv: 'cached' }))
   backup(@Query('user') name: string | undefined, @Query('fail') fail?: string) {
