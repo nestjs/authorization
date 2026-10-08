@@ -1,3 +1,5 @@
+import type { ExecutionContext } from '@nestjs/common';
+
 type AbilityFn = (user: any, ...args: any[]) => boolean | Promise<boolean>;
 
 /** The abilities of policy `P`, keyed by name. */
@@ -34,15 +36,12 @@ export type UserArg<P, A extends keyof P> =
   null extends AbilityUser<P, A> ? AbilityUser<P, A> | undefined : AbilityUser<P, A>;
 
 /**
- * Abilities usable in `@Can()`: callable with the user alone, and accepting
- * `null`, because the guard cannot know statically whether a route has a user.
+ * Abilities usable in `@Can()`: those accepting `null` as the user, because
+ * the guard cannot know statically whether a route has a user. Any further
+ * parameters come from the `@Can()` resolver.
  */
 export type RouteAbility<P> = {
-  [K in Ability<P>]: P[K] extends (user: any) => any
-    ? null extends AbilityUser<P, K>
-      ? K
-      : never
-    : never;
+  [K in Ability<P>]: null extends AbilityUser<P, K> ? K : never;
 }[Ability<P>];
 
 /**
@@ -51,6 +50,30 @@ export type RouteAbility<P> = {
  * message saying why instead of `never`.
  */
 export type CanAbility<P> = [RouteAbility<P>] extends [never]
-  ? 'no ability of this policy works in @Can(): it must take only the user, typed User | null'
+  ? 'no ability of this policy works in @Can(): its user parameter must be typed User | null'
   : // Extract re-lists the names, so errors show them instead of the alias.
     Extract<keyof P, RouteAbility<P>>;
+
+/**
+ * Reads the arguments after the user for ability `A` from the call: route
+ * params, the GraphQL args, the message payload. Runs in the guard, before
+ * pipes, so values are as the transport delivered them. A resolver declared
+ * on its own returns an array, not a tuple: end it with `as const`.
+ */
+export type CanArgsResolver<P, A extends keyof P> = (
+  context: ExecutionContext,
+) => Readonly<AbilityArgs<P, A>> | Promise<Readonly<AbilityArgs<P, A>>>;
+
+/**
+ * The rest of `@Can()`'s parameters for ability `A`: a resolver when the
+ * ability takes arguments after the user, optional when they are all
+ * optional.
+ */
+// Not distributive: an ability cast to `never` (in tests) leaves the resolver optional.
+export type CanArgs<P, A> = [A] extends [never]
+  ? [args?: (context: ExecutionContext) => unknown[]]
+  : A extends keyof P
+    ? [] extends AbilityArgs<P, A>
+      ? [args?: CanArgsResolver<P, A>]
+      : [args: CanArgsResolver<P, A>]
+    : [];

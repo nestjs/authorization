@@ -10,7 +10,8 @@ import type { CanRequirement } from '../interfaces/can-requirement.interface.js'
 
 /**
  * Enforces `@Can()` requirements (class-level first, then method-level; all
- * must pass). Handlers without `@Can()` pass through untouched. Whether a
+ * must pass), each with the arguments its resolver reads from the call.
+ * Handlers without `@Can()` pass through untouched. Whether a
  * route needs a user is authentication's business: with no user, policies
  * run with `null`, and a denial becomes 401 instead of 403.
  *
@@ -38,14 +39,22 @@ export class AuthorizationGuard implements CanActivate {
 
     // A forRootAsync() factory may resolve to nothing: every option is optional.
     const user = toPolicyUser(await (this.options?.getUser ?? defaultGetUser)(context));
-    for (const { policy, ability } of requirements) {
-      const decision = await this.evaluator.decide(policy, ability, user, []);
+    for (const { policy, ability, args: resolve } of requirements) {
+      // Resolved per requirement, in order: once one denies, later resolvers do not run.
+      const args = resolve ? await resolve(context) : [];
+      if (!Array.isArray(args)) {
+        throw new TypeError(
+          `The args of @Can(${policy.name}, '${ability}') must return an array: ` +
+            `the ability's arguments after the user.`,
+        );
+      }
+      const decision = await this.evaluator.decide(policy, ability, user, args);
       if (decision === 'allow') {
         continue;
       }
 
       const handler = `${context.getClass().name}.${context.getHandler().name}`;
-      this.events.emit({ type: 'denied', policy: policy.name, ability, reason: decision, user, args: [], handler });
+      this.events.emit({ type: 'denied', policy: policy.name, ability, reason: decision, user, args, handler });
       throw await toTransportError(context, new AuthorizationError(decision, policy.name, ability));
     }
 

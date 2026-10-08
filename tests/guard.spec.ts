@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   HttpException,
   NotFoundException,
@@ -58,6 +59,27 @@ class ClassOnlyController {
   handler() {}
 }
 
+@Policy()
+class WorkoutPolicy {
+  before(_user: User | null, ability: string, ...args: unknown[]) {
+    evaluated.push(`before:${ability}:${args.join(',')}`);
+    return undefined;
+  }
+
+  view(user: User | null, workoutId: string) {
+    evaluated.push(`view:${workoutId}`);
+    return user?.id === 1 && workoutId === 'w1';
+  }
+}
+
+const workoutIdOf = (context: ExecutionContext) => [context.switchToHttp().getRequest().params.workoutId as string] as const;
+
+@Can(SteppingPolicy, 'first')
+class WorkoutsController {
+  @Can(WorkoutPolicy, 'view', workoutIdOf)
+  findOne() {}
+}
+
 /** An `http` context for `handler` of `type`, whose request carries `user`. */
 const httpContext = (type: Function, handler: Function, user?: unknown) =>
   ({
@@ -65,6 +87,15 @@ const httpContext = (type: Function, handler: Function, user?: unknown) =>
     getClass: () => type,
     getHandler: () => handler,
     switchToHttp: () => ({ getRequest: () => ({ user }) }),
+  }) as unknown as ExecutionContext;
+
+/** An `http` context whose request carries `user` and route `params`. */
+const requestContext = (type: Function, handler: Function, user: unknown, params: Record<string, string>) =>
+  ({
+    getType: () => 'http',
+    getClass: () => type,
+    getHandler: () => handler,
+    switchToHttp: () => ({ getRequest: () => ({ user, params }) }),
   }) as unknown as ExecutionContext;
 
 const contextOf = (type: string) => ({ getType: () => type }) as unknown as ExecutionContext;
@@ -76,7 +107,7 @@ describe('AuthorizationGuard', () => {
 
   beforeAll(async () => {
     moduleRef = await Test.createTestingModule({
-      imports: [AuthorizationModule.forRoot({ policies: [SteppingPolicy] })],
+      imports: [AuthorizationModule.forRoot({ policies: [SteppingPolicy, WorkoutPolicy] })],
     }).compile();
     await moduleRef.init();
     guard = moduleRef.get(AuthorizationGuard);
@@ -138,6 +169,76 @@ describe('AuthorizationGuard', () => {
     expect(error.getResponse()).toEqual({ message: 'Forbidden', statusCode: 403 });
     expect(error.cause).toBeInstanceOf(AuthorizationError);
     expect(error.cause).toMatchObject({ policy: 'SteppingPolicy', ability: 'second', reason: 'forbidden' });
+  });
+
+  describe('arguments read from the call', () => {
+    const findOne = (user: User | undefined, workoutId: string) =>
+      requestContext(WorkoutsController, WorkoutsController.prototype.findOne, user, { workoutId });
+
+    it('hands before() and the ability the arguments its resolver reads', async () => {
+      expect(await guard.canActivate(findOne(users.alice, 'w1'))).toBe(true);
+      expect(evaluated).toEqual(['first', 'before:view:w1', 'view:w1']);
+    });
+
+    it('reports the arguments with the denial', async () => {
+      await expect(guard.canActivate(findOne(users.alice, 'w2'))).rejects.toBeInstanceOf(ForbiddenException);
+      expect(denials).toEqual([
+        {
+          type: 'denied',
+          policy: 'WorkoutPolicy',
+          ability: 'view',
+          reason: 'forbidden',
+          user: users.alice,
+          args: ['w2'],
+          handler: 'WorkoutsController.findOne',
+        },
+      ]);
+    });
+
+    it('runs no resolver once an earlier requirement denies', async () => {
+      const resolve = vi.fn(workoutIdOf);
+      @Can(SteppingPolicy, 'first')
+      class Guarded {
+        @Can(WorkoutPolicy, 'view', resolve)
+        findOne() {}
+      }
+
+      await expect(
+        guard.canActivate(requestContext(Guarded, Guarded.prototype.findOne, undefined, { workoutId: 'w1' })),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(resolve).not.toHaveBeenCalled();
+    });
+
+    it('awaits an async resolver, and lets an error it throws through as it is, reporting no denial', async () => {
+      class Async {
+        @Can(WorkoutPolicy, 'view', async () => ['w1'])
+        allowed() {}
+
+        @Can(WorkoutPolicy, 'view', () => {
+          throw new BadRequestException('workoutId is required');
+        })
+        broken() {}
+      }
+
+      expect(await guard.canActivate(requestContext(Async, Async.prototype.allowed, users.alice, {}))).toBe(true);
+      await expect(guard.canActivate(requestContext(Async, Async.prototype.broken, users.alice, {}))).rejects.toThrow(
+        new BadRequestException('workoutId is required'),
+      );
+      expect(denials).toEqual([]);
+    });
+
+    it('fails when a resolver returns something other than an array', async () => {
+      class Untyped {
+        @Can(WorkoutPolicy, 'view', (() => 'w1') as never)
+        findOne() {}
+      }
+
+      await expect(
+        guard.canActivate(requestContext(Untyped, Untyped.prototype.findOne, users.alice, {})),
+      ).rejects.toThrow(
+        "The args of @Can(WorkoutPolicy, 'view') must return an array: the ability's arguments after the user.",
+      );
+    });
   });
 
   it('lets a handler without @Can() through without asking for the user', async () => {

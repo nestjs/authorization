@@ -21,7 +21,7 @@ export interface AuthorizationDeniedEvent {
   reason: DenialReason;
   /** The user the policy saw; `null` for a guest. */
   user: unknown;
-  /** The ability's arguments after the user, such as the record. Empty for `@Can()`. */
+  /** The ability's arguments after the user, such as the record; for `@Can()`, what its resolver read. */
   args: readonly unknown[];
   /** The handler `@Can()` guarded, as `ClassName.methodName`. Absent for `authorize()`. */
   handler?: string;
