@@ -23,7 +23,7 @@
 
 ## Description
 
-Policy-based authorization module for [Nest](https://github.com/nestjs/nest): policy classes as ordinary providers, enforced by the `@Can()` guard on routes and by `AuthorizationService` inside services, across HTTP, GraphQL, WebSockets and microservices, with no third-party dependencies.
+Policy-based authorization module for [Nest](https://github.com/nestjs/nest): policy classes as ordinary providers, enforced by the `@Can()` guard on routes and by `AuthorizationService` inside services, across HTTP, GraphQL, WebSockets, microservices and MCP tool calls (`@nestjs/mcp`), with no third-party dependencies.
 
 ## Installation
 
