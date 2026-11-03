@@ -28,6 +28,7 @@ function load(pkg: '@nestjs/websockets' | '@nestjs/microservices', name: string)
  * | Context | Error | Client sees |
  * | --- | --- | --- |
  * | `http`, `graphql` | `UnauthorizedException` / `ForbiddenException` | `{"message":"Forbidden","statusCode":403}`, or the `UNAUTHENTICATED` / `FORBIDDEN` code |
+ * | `mcp` | `UnauthorizedException` / `ForbiddenException` | a tool result with `isError: true` and the text `Forbidden`; for a resource or a prompt, a JSON-RPC error with the message and the status (`@nestjs/mcp`) |
  * | `ws` | `WsException` | `{ status: 'error', message: 'Forbidden', statusCode: 403 }` |
  * | `rpc` | `RpcException` | `{ message: 'Forbidden', statusCode: 403 }` |
  *
@@ -58,6 +59,9 @@ export async function toTransportError(context: ExecutionContext, denial: Author
       }
       break;
     }
+    case 'mcp':
+      // Nest's own exception, as for HTTP: `@nestjs/mcp` maps an HttpException to the MCP answer for it.
+      break;
   }
 
   return exception;
