@@ -21,6 +21,12 @@ export const toPolicyUser = (user: unknown): unknown => (user === undefined || u
  * - `graphql`: the user authentication recorded for this operation, when it
  *   answers (below); else `context.req.user`, read from the resolver args
  *   positionally so this package needs no `@nestjs/graphql` dependency
+ * - `mcp`: a call of an MCP server's tool, resource or prompt (`@nestjs/mcp`),
+ *   whose arguments are `[input, context]`: `user` on `context.request`, the
+ *   HTTP request the call arrived in (each MCP request has one of its own),
+ *   else, over stdio, where there is none, on the context itself, where
+ *   `@nestjs/authentication` records it. Read positionally, so this package
+ *   needs no `@nestjs/mcp` dependency
  *
  * A `null` user is an answer (authentication ran, and the caller is
  * anonymous), so only `undefined` looks further.
@@ -55,6 +61,11 @@ export function defaultGetUser(context: ExecutionContext): unknown {
       const req = context.getArgByIndex(2)?.req;
       const own = recordedUser(req, context);
       return own !== undefined ? own : req?.user;
+    }
+    case 'mcp': {
+      // MCP call args are (input, context).
+      const call = context.getArgByIndex(1);
+      return (call?.request ?? call)?.user;
     }
     default:
       return undefined;
