@@ -27,6 +27,11 @@ export const toPolicyUser = (user: unknown): unknown => (user === undefined || u
  *   else, over stdio, where there is none, on the context itself, where
  *   `@nestjs/authentication` records it. Read positionally, so this package
  *   needs no `@nestjs/mcp` dependency
+ * - `ai`: a call of an agent function (`@nestjs/ai`), whose arguments are
+ *   `[input, context]` as well: `user` on `context.request`, the HTTP request
+ *   the agent runs in, else, in a job, where there is none, the `user` the
+ *   agent acts for, on the context itself. Read positionally, so this package
+ *   needs no `@nestjs/ai` dependency
  *
  * A `null` user is an answer (authentication ran, and the caller is
  * anonymous), so only `undefined` looks further.
@@ -62,8 +67,9 @@ export function defaultGetUser(context: ExecutionContext): unknown {
       const own = recordedUser(req, context);
       return own !== undefined ? own : req?.user;
     }
-    case 'mcp': {
-      // MCP call args are (input, context).
+    case 'mcp':
+    case 'ai': {
+      // MCP call and agent function args are (input, context).
       const call = context.getArgByIndex(1);
       return (call?.request ?? call)?.user;
     }
