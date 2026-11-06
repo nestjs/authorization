@@ -107,7 +107,8 @@ const GRAPHQL_MODULE_OPTIONS = 'GqlModuleOptions';
 /**
  * The metadata Nest puts on the methods it routes calls to: HTTP routes,
  * message patterns, gateway messages, GraphQL queries, mutations,
- * subscriptions and field resolvers.
+ * subscriptions and field resolvers, and MCP tools, resources and prompts
+ * (`MCP_PRIMITIVE_METADATA` of `@nestjs/mcp`).
  */
 const HANDLER_METADATA = [
   'method',
@@ -115,6 +116,7 @@ const HANDLER_METADATA = [
   'websockets:message_mapping',
   'graphql:resolver_type',
   GRAPHQL_FIELD_RESOLVER,
+  'nestjs:mcp:primitive',
 ];
 const isHandler = (method: Function) => HANDLER_METADATA.some((key) => Reflect.getMetadata(key, method) !== undefined);
 

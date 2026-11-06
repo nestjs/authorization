@@ -513,6 +513,49 @@ describe('AuthorizationModule', () => {
         await request(app.getHttpServer()).get('/open').expect(200);
       });
 
+      it('logs the MCP tools, resources and prompts the guard denies', async () => {
+        /** Stands in for `@nestjs/mcp`'s decorators: they record the primitive under `MCP_PRIMITIVE_METADATA`. */
+        const Primitive = (kind: string) => SetMetadata('nestjs:mcp:primitive', { kind, options: {} });
+
+        @Injectable()
+        class OrdersTools {
+          @Primitive('tool')
+          refund() {}
+
+          @Primitive('tool')
+          @Can(PostPolicy, 'create')
+          checked() {}
+
+          @Primitive('tool')
+          @Can.Anyone()
+          anyone() {}
+
+          @Primitive('resource')
+          orders() {}
+
+          @Primitive('resource-template')
+          order() {}
+
+          @Primitive('prompt')
+          summary() {}
+
+          // Not a primitive: nothing calls it.
+          helper() {}
+        }
+
+        @Module({
+          imports: [AuthorizationModule.forRoot({ policies: [PostPolicy] })],
+          providers: [OrdersTools],
+        })
+        class AppModule {}
+
+        app = await boot(AppModule);
+        expect(errors).toEqual([
+          'AuthorizationGuard denies every call to OrdersTools.refund, OrdersTools.orders, OrdersTools.order, ' +
+            `OrdersTools.summary: they declare no check. ${fix}`,
+        ]);
+      });
+
       it('names field resolvers only when GraphQL runs guards on them', async () => {
         @Module({
           imports: [AuthorizationModule.forRoot()],
