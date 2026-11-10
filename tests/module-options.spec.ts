@@ -7,6 +7,7 @@ import {
   type CanActivate,
   type ExecutionContext,
   type INestApplication,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
@@ -143,6 +144,46 @@ describe('AuthorizationModule options', () => {
 
       app = await boot(AppModule);
       await request(app.getHttpServer()).get('/posts').expect(200);
+    });
+
+    it('calls a getUser method of the options factory on its object, so it can use this', async () => {
+      @Injectable()
+      class AuthorizationConfig implements AuthorizationOptionsFactory {
+        private readonly user = users.alice;
+
+        createAuthorizationOptions(): AuthorizationModuleOptions {
+          return this;
+        }
+
+        getUser(): User {
+          return this.user;
+        }
+      }
+
+      @Module({
+        imports: [AuthorizationModule.forRootAsync({ useClass: AuthorizationConfig, policies: [PostPolicy] })],
+        controllers: [PostsController],
+      })
+      class AppModule {}
+
+      app = await boot(AppModule);
+      await request(app.getHttpServer()).get('/posts').expect(200);
+    });
+
+    it('treats a getUser that finds no user as no user, without falling back to request.user', async () => {
+      const moduleRef = await Test.createTestingModule({
+        imports: [AuthorizationModule.forRoot({ getUser: () => undefined, policies: [PostPolicy] })],
+      }).compile();
+      const guard = moduleRef.get(AuthorizationGuard);
+      const context = {
+        getType: () => 'http',
+        getClass: () => PostsController,
+        getHandler: () => PostsController.prototype.list,
+        switchToHttp: () => ({ getRequest: () => ({ user: users.alice }) }),
+      } as unknown as ExecutionContext;
+
+      await expect(guard.canActivate(context)).rejects.toBeInstanceOf(UnauthorizedException);
+      await moduleRef.close();
     });
   });
 

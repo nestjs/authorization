@@ -37,8 +37,9 @@ export class AuthorizationGuard implements CanActivate {
       return true;
     }
 
-    // A forRootAsync() factory may resolve to nothing: every option is optional.
-    const user = toPolicyUser(await (this.options?.getUser ?? defaultGetUser)(context));
+    // A forRootAsync() factory may resolve to nothing: every option is optional. `getUser` is called on the options,
+    // so a method of a `useClass` factory that returns itself can use `this`.
+    const user = toPolicyUser(await (this.options?.getUser ? this.options.getUser(context) : defaultGetUser(context)));
     if (requirements.length === 0) {
       // Declares no check: a forgotten @Can() must not open the route.
       return this.deny(context, user === null ? 'unauthenticated' : 'forbidden', user, null, null, []);
