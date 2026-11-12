@@ -661,8 +661,9 @@ describe('AuthorizationModule', () => {
             logger: false,
             abortOnError: false,
           });
+          // listen(), as main.ts does: init() runs the init hooks twice on Nest 12.0.
           try {
-            await microservice.init();
+            await microservice.listen();
           } finally {
             await microservice.close();
           }
