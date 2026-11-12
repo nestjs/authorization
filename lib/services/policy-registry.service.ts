@@ -1,6 +1,6 @@
 import { Injectable, Logger, Scope, type OnModuleInit, type Type } from '@nestjs/common';
 import { GUARDS_METADATA } from '@nestjs/common/constants.js';
-import { APP_GUARD, DiscoveryService, MetadataScanner, ModulesContainer } from '@nestjs/core';
+import { APP_GUARD, DiscoveryService, HttpAdapterHost, MetadataScanner, ModulesContainer } from '@nestjs/core';
 import { AUTHENTICATION_GUARD, AUTHORIZATION_GUARD, POLICY_METADATA } from '../authorization.constants.js';
 import { MissingPolicyError } from '../errors/missing-policy.error.js';
 import type { CanRequirement } from '../interfaces/can-requirement.interface.js';
@@ -99,6 +99,8 @@ function misorderMessages(misordered: Misordered, known: boolean): string[] {
   );
 }
 
+/** The metadata `@MessagePattern()` and `@EventPattern()` put on their methods. */
+const MESSAGE_PATTERN = 'microservices:pattern';
 /** The metadata `@nestjs/graphql` puts on `@ResolveField()` methods. */
 const GRAPHQL_FIELD_RESOLVER = 'graphql:resolve_property';
 /** The metadata `@nestjs/graphql` puts on a federation `@ResolveReference()` method. */
@@ -114,14 +116,15 @@ const GRAPHQL_MODULE_OPTIONS = 'GqlModuleOptions';
  */
 const HANDLER_METADATA = [
   'method',
-  'microservices:pattern',
+  MESSAGE_PATTERN,
   'websockets:message_mapping',
   'graphql:resolver_type',
   GRAPHQL_FIELD_RESOLVER,
   GRAPHQL_REFERENCE_RESOLVER,
   'nestjs:mcp:primitive',
 ];
-const isHandler = (method: Function) => HANDLER_METADATA.some((key) => Reflect.getMetadata(key, method) !== undefined);
+/** The `HANDLER_METADATA` keys on `method`: none for a method Nest routes nothing to. */
+const routesOf = (method: Function) => HANDLER_METADATA.filter((key) => Reflect.getMetadata(key, method) !== undefined);
 
 interface CanTarget {
   /** `ProductsController.create`. */
@@ -137,6 +140,8 @@ interface CanTarget {
   fieldResolver: boolean;
   /** A `@ResolveReference()`: `_entities` calls it directly, so no query of its class covers it. */
   referenceResolver: boolean;
+  /** A message or event pattern, and no other route: in an HTTP app, only a connected microservice calls it. */
+  messageHandler: boolean;
   /** `@Can.Anyone()` or `@Public()`: with no requirement, anyone may call it. */
   open: boolean;
 }
@@ -154,6 +159,7 @@ export class PolicyRegistry implements OnModuleInit {
     private readonly discovery: DiscoveryService,
     private readonly metadataScanner: MetadataScanner,
     private readonly modules: ModulesContainer,
+    private readonly adapterHost: HttpAdapterHost,
   ) {}
 
   onModuleInit() {
@@ -223,7 +229,10 @@ export class PolicyRegistry implements OnModuleInit {
    * after the authorization guard and looks like authentication (going by a
    * class name is a guess, so it does not fail), and lists the handlers the
    * guard denies because they declare no check: denying them is the
-   * intended outcome, so that does not fail either.
+   * intended outcome, so that does not fail either. In an HTTP app, a
+   * message handler that only the global guard would deny is listed in a
+   * warning instead: a connected microservice runs the app's global guards
+   * only with inheritAppConfig: true, which the container does not show.
    */
   private verifyCanUsage() {
     const targets = this.collectCanTargets();
@@ -239,15 +248,19 @@ export class PolicyRegistry implements OnModuleInit {
     const unguardedFields: string[] = [];
     const unenforced: string[] = [];
     const undeclared: string[] = [];
+    const undeclaredIfInherited: string[] = [];
+    // A microservice of its own has none: null from NestFactory, undefined from the testing module.
+    const httpApp = !!this.adapterHost.httpAdapter;
     const misordered: Misordered = new Map(); // AuthenticationGuard, by its brand: fails
     const suspected: Misordered = new Map(); // other guards, by their names: logs
 
-    for (const { where, requirements, guards, fieldResolver, referenceResolver, open } of targets) {
+    for (const { where, requirements, guards, fieldResolver, referenceResolver, messageHandler, open } of targets) {
       if (requirements.length === 0) {
         // A route handler with no @Can(): denied, unless it is open or no guard runs on it.
         const guarded = [...globalGuards, ...guards].some(isAuthorizationGuard);
         if (!open && guarded && (!fieldResolver || guardsFieldResolvers === true)) {
-          undeclared.push(where);
+          const onlyGlobal = httpApp && messageHandler && !guards.some(isAuthorizationGuard);
+          (onlyGlobal ? undeclaredIfInherited : undeclared).push(where);
         }
         continue;
       }
@@ -341,6 +354,15 @@ export class PolicyRegistry implements OnModuleInit {
           `where anyone may call the handler (a @Public() route from @nestjs/authentication needs neither).`,
       );
     }
+    if (undeclaredIfInherited.length > 0) {
+      const one = undeclaredIfInherited.length === 1;
+      this.logger.warn(
+        `In a microservice connected with inheritAppConfig: true, AuthorizationGuard denies every call to ` +
+          `${undeclaredIfInherited.join(', ')}: ${one ? 'it declares' : 'they declare'} no check. Without that ` +
+          `option, Nest runs none of the app's global guards on ${one ? 'it' : 'them'}. Add @Can(), or ` +
+          `@Can.Anyone() where anyone may call the handler.`,
+      );
+    }
   }
 
   /**
@@ -362,9 +384,10 @@ export class PolicyRegistry implements OnModuleInit {
       for (const key of this.metadataScanner.getAllMethodNames(type.prototype)) {
         const method = type.prototype[key];
         const { onClass, onMethod, open } = routeChecks(type, method);
+        const routes = routesOf(method);
         // A class-level @Can() covers the handlers: decorated methods, not helpers.
         const covered = onClass.length > 0 && Reflect.getOwnMetadataKeys(method).length > 0;
-        if (onMethod.length === 0 && !covered && !isHandler(method)) {
+        if (onMethod.length === 0 && !covered && routes.length === 0) {
           continue;
         }
         // An undecorated method under a class-level @Can() is a helper: no requirement applies to it.
@@ -382,6 +405,7 @@ export class PolicyRegistry implements OnModuleInit {
             Reflect.getMetadata(GRAPHQL_FIELD_RESOLVER, method) === true ||
             Reflect.getMetadata(GRAPHQL_REFERENCE_RESOLVER, method) === true,
           referenceResolver: Reflect.getMetadata(GRAPHQL_REFERENCE_RESOLVER, method) === true,
+          messageHandler: routes.length === 1 && routes[0] === MESSAGE_PATTERN,
           open,
         });
       }

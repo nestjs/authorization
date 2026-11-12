@@ -11,9 +11,9 @@ import {
   type ExecutionContext,
   type INestApplication,
 } from '@nestjs/common';
-import { APP_GUARD, LazyModuleLoader } from '@nestjs/core';
+import { APP_GUARD, LazyModuleLoader, NestFactory } from '@nestjs/core';
 import { Query as GraphqlQuery, ResolveField, ResolveReference } from '@nestjs/graphql';
-import { MessagePattern } from '@nestjs/microservices';
+import { EventPattern, MessagePattern, Transport } from '@nestjs/microservices';
 import { SubscribeMessage } from '@nestjs/websockets';
 import { Test, type TestingModuleBuilder } from '@nestjs/testing';
 import request from 'supertest';
@@ -335,10 +335,15 @@ describe('AuthorizationModule', () => {
 
   describe('startup checks', () => {
     const errors: string[] = [];
+    const warnings: string[] = [];
     beforeEach(() => {
       errors.length = 0;
+      warnings.length = 0;
       vi.spyOn(Logger.prototype, 'error').mockImplementation((message: unknown) => {
         errors.push(String(message));
+      });
+      vi.spyOn(Logger.prototype, 'warn').mockImplementation((message: unknown) => {
+        warnings.push(String(message));
       });
     });
 
@@ -447,6 +452,11 @@ describe('AuthorizationModule', () => {
       const fix =
         'Add @Can(), or @Can.Anyone() where anyone may call the handler ' +
         '(a @Public() route from @nestjs/authentication needs neither).';
+      /** The warning about the message handlers of an HTTP app, which only some microservices run guards on. */
+      const inheritedOnly = (handlers: string, pronoun: string) =>
+        'In a microservice connected with inheritAppConfig: true, AuthorizationGuard denies every call to ' +
+        `${handlers} no check. Without that option, Nest runs none of the app's global guards on ${pronoun}. ` +
+        'Add @Can(), or @Can.Anyone() where anyone may call the handler.';
 
       @Controller('mixed')
       class MixedController {
@@ -507,9 +517,10 @@ describe('AuthorizationModule', () => {
 
         app = await boot(AppModule);
         expect(errors).toEqual([
-          'AuthorizationGuard denies every call to MixedController.forgotten, MixedController.orders, ' +
-            `ChatGateway.message, ReportsResolver.report: they declare no check. ${fix}`,
+          'AuthorizationGuard denies every call to MixedController.forgotten, ChatGateway.message, ' +
+            `ReportsResolver.report: they declare no check. ${fix}`,
         ]);
+        expect(warnings).toEqual([inheritedOnly('MixedController.orders: it declares', 'it')]);
         await request(app.getHttpServer()).get('/mixed/forgotten').expect(401);
         await request(app.getHttpServer()).get('/mixed/anyone').expect(200);
         await request(app.getHttpServer()).get('/mixed/public').expect(200);
@@ -599,6 +610,68 @@ describe('AuthorizationModule', () => {
         ]);
         await request(app.getHttpServer()).get('/guarded/unguarded').expect(200);
         await request(app.getHttpServer()).get('/guarded/guarded').expect(401);
+      });
+
+      // Nest gives a microservice connected to an HTTP app the app's global
+      // guards only with inheritAppConfig: true, which the module cannot see.
+      describe('message handlers', () => {
+        @Controller('refunds')
+        class RefundsController {
+          @MessagePattern('refunds.list')
+          list() {}
+
+          @EventPattern('refunds.issued')
+          issued(_refund: unknown) {}
+
+          // An HTTP route as well, which the global guard always runs on.
+          @Get()
+          @MessagePattern('refunds.find')
+          find() {}
+        }
+
+        @Controller()
+        @UseGuards(AuthorizationGuard)
+        class PayoutsController {
+          @MessagePattern('payouts.list')
+          list() {}
+        }
+
+        @Module({
+          imports: [AuthorizationModule.forRoot()],
+          controllers: [RefundsController, PayoutsController],
+        })
+        class MessagesModule {}
+
+        it('in an HTTP app, warns about those only the global guard would deny', async () => {
+          app = await boot(MessagesModule);
+          expect(errors).toEqual([
+            'AuthorizationGuard denies every call to RefundsController.find, PayoutsController.list: ' +
+              `they declare no check. ${fix}`,
+          ]);
+          expect(warnings).toEqual([
+            inheritedOnly('RefundsController.list, RefundsController.issued: they declare', 'them'),
+          ]);
+        });
+
+        it('in a microservice of its own, which runs the global guards, names them all', async () => {
+          // Through NestFactory, as in main.ts: it records the missing HTTP adapter as null.
+          const microservice = await NestFactory.createMicroservice(MessagesModule, {
+            transport: Transport.TCP,
+            options: { host: '127.0.0.1', port: 0 },
+            logger: false,
+            abortOnError: false,
+          });
+          try {
+            await microservice.init();
+          } finally {
+            await microservice.close();
+          }
+          expect(errors).toEqual([
+            'AuthorizationGuard denies every call to RefundsController.list, RefundsController.issued, ' +
+              `RefundsController.find, PayoutsController.list: they declare no check. ${fix}`,
+          ]);
+          expect(warnings).toEqual([]);
+        });
       });
     });
 
