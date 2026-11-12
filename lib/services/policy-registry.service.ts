@@ -101,14 +101,16 @@ function misorderMessages(misordered: Misordered, known: boolean): string[] {
 
 /** The metadata `@nestjs/graphql` puts on `@ResolveField()` methods. */
 const GRAPHQL_FIELD_RESOLVER = 'graphql:resolve_property';
+/** The metadata `@nestjs/graphql` puts on a federation `@ResolveReference()` method. */
+const GRAPHQL_REFERENCE_RESOLVER = 'graphql:resolve_reference';
 /** The injection token of `GraphQLModule`'s options. */
 const GRAPHQL_MODULE_OPTIONS = 'GqlModuleOptions';
 
 /**
  * The metadata Nest puts on the methods it routes calls to: HTTP routes,
  * message patterns, gateway messages, GraphQL queries, mutations,
- * subscriptions and field resolvers, and MCP tools, resources and prompts
- * (`MCP_PRIMITIVE_METADATA` of `@nestjs/mcp`).
+ * subscriptions, field resolvers and federation reference resolvers, and MCP
+ * tools, resources and prompts (`MCP_PRIMITIVE_METADATA` of `@nestjs/mcp`).
  */
 const HANDLER_METADATA = [
   'method',
@@ -116,6 +118,7 @@ const HANDLER_METADATA = [
   'websockets:message_mapping',
   'graphql:resolver_type',
   GRAPHQL_FIELD_RESOLVER,
+  GRAPHQL_REFERENCE_RESOLVER,
   'nestjs:mcp:primitive',
 ];
 const isHandler = (method: Function) => HANDLER_METADATA.some((key) => Reflect.getMetadata(key, method) !== undefined);
@@ -127,8 +130,13 @@ interface CanTarget {
   requirements: (CanRequirement & { declaredOn: string })[];
   /** `@UseGuards()` of the class, then of the method: the order Nest runs them in. */
   guards: unknown[];
-  /** A GraphQL `@ResolveField()`, which runs guards only when GraphQLModule says so. */
+  /**
+   * A GraphQL `@ResolveField()` or federation `@ResolveReference()`: GraphQL
+   * runs guards on either only when GraphQLModule says so.
+   */
   fieldResolver: boolean;
+  /** A `@ResolveReference()`: `_entities` calls it directly, so no query of its class covers it. */
+  referenceResolver: boolean;
   /** `@Can.Anyone()` or `@Public()`: with no requirement, anyone may call it. */
   open: boolean;
 }
@@ -207,7 +215,8 @@ export class PolicyRegistry implements OnModuleInit {
 
   /**
    * Fails startup when a `@Can()` names a policy or an ability that does not
-   * exist, sits on a GraphQL field resolver that GraphQL runs without guards,
+   * exist, sits on a GraphQL field resolver that GraphQL runs without guards
+   * (or on a class whose reference resolver GraphQL runs without them),
    * or when `@nestjs/authentication`'s guard runs after the authorization
    * guard, so the policy would see every caller as a guest. Logs an error
    * when a `@Can()` is not enforced by any guard, when another guard runs
@@ -233,7 +242,7 @@ export class PolicyRegistry implements OnModuleInit {
     const misordered: Misordered = new Map(); // AuthenticationGuard, by its brand: fails
     const suspected: Misordered = new Map(); // other guards, by their names: logs
 
-    for (const { where, requirements, guards, fieldResolver, open } of targets) {
+    for (const { where, requirements, guards, fieldResolver, referenceResolver, open } of targets) {
       if (requirements.length === 0) {
         // A route handler with no @Can(): denied, unless it is open or no guard runs on it.
         const guarded = [...globalGuards, ...guards].some(isAuthorizationGuard);
@@ -255,15 +264,22 @@ export class PolicyRegistry implements OnModuleInit {
 
       if (fieldResolver && guardsFieldResolvers === false) {
         // No guard runs here. A @Can() on the method would guard nothing; one on
-        // the class guards the resolver's queries, like a class-level @UseGuards().
+        // the class guards the resolver's queries, like a class-level @UseGuards(),
+        // but not its reference resolver, which no query of the class leads to.
+        const kind = referenceResolver ? 'reference' : 'field';
         for (const { policy, ability, declaredOn } of requirements) {
-          if (declaredOn !== where) {
-            continue;
+          if (declaredOn === where) {
+            unguardedFields.push(
+              `@Can(${policy.name}, '${ability}') on ${where} is not enforced: GraphQL runs guards on ${kind} ` +
+                `resolvers only with fieldResolverEnhancers: ['guards'] in the GraphQLModule options.`,
+            );
+          } else if (referenceResolver) {
+            unguardedFields.push(
+              `@Can(${policy.name}, '${ability}') on ${declaredOn} is not enforced on ${where}: GraphQL runs guards ` +
+                `on reference resolvers only with fieldResolverEnhancers: ['guards'] in the GraphQLModule options. ` +
+                `Where anyone may resolve the entity, add @Can.Anyone() to ${where}.`,
+            );
           }
-          unguardedFields.push(
-            `@Can(${policy.name}, '${ability}') on ${where} is not enforced: GraphQL runs guards on field ` +
-              `resolvers only with fieldResolverEnhancers: ['guards'] in the GraphQLModule options.`,
-          );
         }
         continue;
       }
@@ -362,7 +378,10 @@ export class PolicyRegistry implements OnModuleInit {
             ...onMethod.map((requirement) => ({ ...requirement, declaredOn: where })),
           ],
           guards: [...classGuards, ...(Reflect.getMetadata(GUARDS_METADATA, method) ?? [])],
-          fieldResolver: Reflect.getMetadata(GRAPHQL_FIELD_RESOLVER, method) === true,
+          fieldResolver:
+            Reflect.getMetadata(GRAPHQL_FIELD_RESOLVER, method) === true ||
+            Reflect.getMetadata(GRAPHQL_REFERENCE_RESOLVER, method) === true,
+          referenceResolver: Reflect.getMetadata(GRAPHQL_REFERENCE_RESOLVER, method) === true,
           open,
         });
       }

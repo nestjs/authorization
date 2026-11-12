@@ -504,6 +504,7 @@ describe('defaultGetUser edge cases', () => {
       switchToHttp: () => ({ getRequest: () => parts.request }),
       switchToWs: () => ({ getClient: () => parts.client }),
       switchToRpc: () => ({ getContext: () => parts.rpcContext }),
+      getArgs: () => parts.args ?? [],
       getArgByIndex: (i: number) => parts.args?.[i],
     }) as unknown as ExecutionContext;
 

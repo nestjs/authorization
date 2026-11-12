@@ -291,6 +291,7 @@ describe('defaultGetUser', () => {
       switchToHttp: () => ({ getRequest: () => parts.request }),
       switchToWs: () => ({ getClient: () => parts.client }),
       switchToRpc: () => ({ getContext: () => parts.rpcContext, getData: () => parts.data }),
+      getArgs: () => parts.args ?? [],
       getArgByIndex: (i: number) => parts.args?.[i],
     }) as unknown as ExecutionContext;
 
@@ -299,7 +300,13 @@ describe('defaultGetUser', () => {
     expect(defaultGetUser(ctx('ws', { client: { user: 'w' } }))).toBe('w');
     expect(defaultGetUser(ctx('ws', { client: { data: { user: 'sio' } } }))).toBe('sio');
     expect(defaultGetUser(ctx('rpc', { rpcContext: { user: 'c' }, data: {} }))).toBe('c');
-    expect(defaultGetUser(ctx('graphql', { args: [{}, {}, { req: { user: 'g' } }] }))).toBe('g');
+    expect(defaultGetUser(ctx('graphql', { args: [{}, {}, { req: { user: 'g' } }, {}] }))).toBe('g');
+    // A federation reference resolver's args are (reference, context, info).
+    expect(defaultGetUser(ctx('graphql', { args: [{ id: '7' }, { req: { user: 'ref' } }, {}] }))).toBe('ref');
+  });
+
+  it("never reads a graphql operation's arguments, which the client writes", () => {
+    expect(defaultGetUser(ctx('graphql', { args: [{}, { req: { user: 'forged' } }, {}, {}] }))).toBeUndefined();
   });
 
   it('never reads the rpc payload, which the producer writes', () => {

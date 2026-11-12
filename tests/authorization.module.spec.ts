@@ -12,7 +12,7 @@ import {
   type INestApplication,
 } from '@nestjs/common';
 import { APP_GUARD, LazyModuleLoader } from '@nestjs/core';
-import { Query as GraphqlQuery, ResolveField } from '@nestjs/graphql';
+import { Query as GraphqlQuery, ResolveField, ResolveReference } from '@nestjs/graphql';
 import { MessagePattern } from '@nestjs/microservices';
 import { SubscribeMessage } from '@nestjs/websockets';
 import { Test, type TestingModuleBuilder } from '@nestjs/testing';
@@ -492,6 +492,9 @@ describe('AuthorizationModule', () => {
 
         @ResolveField(() => Number)
         total() {}
+
+        @ResolveReference()
+        reference() {}
       }
 
       it('logs every handler the guard denies, on every transport, without failing the startup', async () => {
@@ -556,7 +559,7 @@ describe('AuthorizationModule', () => {
         ]);
       });
 
-      it('names field resolvers only when GraphQL runs guards on them', async () => {
+      it('names field and reference resolvers only when GraphQL runs guards on them', async () => {
         @Module({
           imports: [AuthorizationModule.forRoot()],
           providers: [
@@ -568,7 +571,8 @@ describe('AuthorizationModule', () => {
 
         app = await boot(AppModule);
         expect(errors).toEqual([
-          `AuthorizationGuard denies every call to ReportsResolver.report, ReportsResolver.total: they declare no check. ${fix}`,
+          'AuthorizationGuard denies every call to ReportsResolver.report, ReportsResolver.total, ' +
+            `ReportsResolver.reference: they declare no check. ${fix}`,
         ]);
       });
 
@@ -595,6 +599,80 @@ describe('AuthorizationModule', () => {
         ]);
         await request(app.getHttpServer()).get('/guarded/unguarded').expect(200);
         await request(app.getHttpServer()).get('/guarded/guarded').expect(401);
+      });
+    });
+
+    // An `_entities` query calls a federation reference resolver directly, and
+    // GraphQL runs guards on it only as it does on field resolvers.
+    describe('federation reference resolvers', () => {
+      const withoutGuards = { provide: 'GqlModuleOptions', useValue: {} };
+      const withGuards = { provide: 'GqlModuleOptions', useValue: { fieldResolverEnhancers: ['guards'] } };
+      const enhancers = "fieldResolverEnhancers: ['guards'] in the GraphQLModule options.";
+
+      @Injectable()
+      class UsersResolver {
+        @GraphqlQuery(() => String)
+        @Can(PostPolicy, 'create')
+        user() {}
+
+        @ResolveReference()
+        @Can(PostPolicy, 'create')
+        resolveReference() {}
+      }
+
+      // A class-level @Can() covers the queries of the class: none leads to its reference resolver.
+      @Injectable()
+      @Can(PostPolicy, 'create')
+      class AccountsResolver {
+        @GraphqlQuery(() => String)
+        account() {}
+
+        @ResolveReference()
+        resolveReference() {}
+      }
+
+      @Injectable()
+      @Can(PostPolicy, 'create')
+      class ProfilesResolver {
+        @GraphqlQuery(() => String)
+        profile() {}
+
+        @ResolveReference()
+        @Can.Anyone()
+        resolveReference() {}
+      }
+
+      /** The startup error, or `undefined` when the app starts. */
+      const startupError = async (...providers: object[]) => {
+        @Module({ imports: [AuthorizationModule.forRoot({ policies: [PostPolicy] })], providers: providers as any[] })
+        class AppModule {}
+        return boot(AppModule).then(
+          (started) => {
+            app = started;
+            return undefined;
+          },
+          (error: Error) => error.message,
+        );
+      };
+
+      it('fails the startup for a @Can() on one GraphQL runs without guards, on the method or the class', async () => {
+        expect(await startupError(UsersResolver, withoutGuards)).toBe(
+          "@Can(PostPolicy, 'create') on UsersResolver.resolveReference is not enforced: GraphQL runs guards on " +
+            `reference resolvers only with ${enhancers}`,
+        );
+        expect(await startupError(AccountsResolver, withoutGuards)).toBe(
+          "@Can(PostPolicy, 'create') on AccountsResolver is not enforced on AccountsResolver.resolveReference: " +
+            `GraphQL runs guards on reference resolvers only with ${enhancers} Where anyone may resolve the ` +
+            'entity, add @Can.Anyone() to AccountsResolver.resolveReference.',
+        );
+      });
+
+      it("starts with fieldResolverEnhancers: ['guards'], or with @Can.Anyone() on the reference resolver", async () => {
+        expect(await startupError(UsersResolver, AccountsResolver, withGuards)).toBeUndefined();
+        await app?.close();
+        app = undefined;
+        expect(await startupError(ProfilesResolver, withoutGuards)).toBeUndefined();
+        expect(errors).toEqual([]);
       });
     });
 

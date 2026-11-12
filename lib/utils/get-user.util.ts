@@ -20,7 +20,8 @@ export const toPolicyUser = (user: unknown): unknown => (user === undefined || u
  *   payload: whoever sends the message writes that.
  * - `graphql`: the user authentication recorded for this operation, when it
  *   answers (below); else `context.req.user`, read from the resolver args
- *   positionally so this package needs no `@nestjs/graphql` dependency
+ *   positionally (a federation reference resolver has no `args` argument) so
+ *   this package needs no `@nestjs/graphql` dependency
  * - `mcp`: a call of an MCP server's tool, resource or prompt (`@nestjs/mcp`),
  *   whose arguments are `[input, context]`: `user` on `context.request`, the
  *   HTTP request the call arrived in (each MCP request has one of its own),
@@ -62,8 +63,11 @@ export function defaultGetUser(context: ExecutionContext): unknown {
     case 'rpc':
       return context.switchToRpc().getContext()?.user;
     case 'graphql': {
-      // Resolver args are (root, args, context, info).
-      const req = context.getArgByIndex(2)?.req;
+      // Resolver args are (root, args, context, info); a federation reference
+      // resolver's are (reference, context, info). `@nestjs/graphql` tells them
+      // apart by the count too. In the first form, index 1 holds the client's
+      // arguments, so it is read only in the second.
+      const req = context.getArgByIndex(context.getArgs().length === 3 ? 1 : 2)?.req;
       const own = recordedUser(req, context);
       return own !== undefined ? own : req?.user;
     }
