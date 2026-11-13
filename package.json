@@ -1,6 +1,6 @@
 {
   "name": "@nestjs/authorization",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Authorization for NestJS: permissions as policy classes that answer \"may this user do this?\", enforced on routes and inside services.",
   "keywords": [
     "nestjs",
