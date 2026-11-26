@@ -60,7 +60,7 @@
     "@nestjs/resilience": "0.0.3",
     "@nestjs/testing": "12.6.0",
     "@nestjs/websockets": "12.6.0",
-    "@types/node": "26.6.10",
+    "@types/node": "26.6.11",
     "@types/supertest": "7.2.1",
     "@types/ws": "8.18.2",
     "graphql": "16.15.0",
